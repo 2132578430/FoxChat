@@ -1,0 +1,26 @@
+from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi.params import Query
+from loguru import logger
+
+from app.schemas import ChatMsgTo
+from app.schemas.M import M
+from app.service import chat_msg_service
+chat_router = APIRouter(prefix="/chat", tags=["chat"])
+
+@chat_router.post("/msg")
+async def chat_msg(chat_msg_to: ChatMsgTo, background_tasks: BackgroundTasks, request: Request):
+
+    logger.info(f"接收到消息：{chat_msg_to}")
+
+    result = await chat_msg_service.chat_msg(chat_msg_to, background_tasks, request)
+
+    logger.info(f"收到回复：{result}")
+
+    return M.get_msg(result)
+
+@chat_router.post("/delete")
+async def chat_delete(
+        user_id: str = Query(..., alias="userId"),
+        llm_id: str = Query(..., alias="llmId")
+):
+    await chat_msg_service.delete_msg(user_id, llm_id)

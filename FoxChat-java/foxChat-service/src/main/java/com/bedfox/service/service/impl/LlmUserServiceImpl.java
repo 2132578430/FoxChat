@@ -1,0 +1,190 @@
+package com.bedfox.service.service.impl;
+
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.TypeReference;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.bedfox.common.constant.ChatRoleConstant;
+import com.bedfox.pojo.domain.LlmChatMsg;
+import com.bedfox.pojo.domain.LlmUser;
+import com.bedfox.pojo.dto.AddLlmFriendDto;
+import com.bedfox.service.mapper.LlmUserMapper;
+import com.bedfox.service.remote.ChatClient;
+import com.bedfox.service.service.LlmChatMsgService;
+import com.bedfox.service.service.LlmUserService;
+import com.bedfox.pojo.to.ChatMqMsgTo;
+import com.bedfox.pojo.to.ChatMsgTo;
+import com.bedfox.common.util.LoginUserHolder;
+import com.bedfox.common.util.M;
+import com.bedfox.common.util.MqUtil;
+import com.bedfox.pojo.vo.FriendVo;
+import com.bedfox.pojo.vo.LlmChatMsgVo;
+import com.bedfox.pojo.vo.LlmMsgHistoryVo;
+import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+/**
+* @author 21325
+* @description 针对表【llm_user】的数据库操作Service实现
+* @createDate 2026-03-20 13:26:13
+*/
+@Slf4j
+@Service
+public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
+    implements LlmUserService{
+
+    @Resource
+    MqUtil mqUtil;
+
+    @Resource
+    ChatClient chatClient;
+
+    @Resource
+    LlmChatMsgService llmChatMsgService;
+
+    /**
+     * 保存大模型
+     * @param friendDto
+     */
+    @Override
+    public void saveFriend(AddLlmFriendDto friendDto) {
+        String userId = LoginUserHolder.getUserId();
+        LlmUser llm = new LlmUser();
+        String experience = friendDto.getExperience();
+
+        llm.setLlmName(friendDto.getNickname());
+        llm.setMemoryContent(experience);
+        llm.setUserId(userId);
+
+        // 保存模型
+        save(llm);
+
+        // 将记忆存入rabbitmq，记忆初始化交给python
+        ChatMqMsgTo chatMqMsgTo = new ChatMqMsgTo();
+
+        chatMqMsgTo.setUserId(userId);
+        chatMqMsgTo.setExperience(experience);
+        chatMqMsgTo.setLlmId(llm.getId());
+
+        mqUtil.sendChatMsg(chatMqMsgTo);
+    }
+
+    /**
+     * 返回用户模型列表给好友检索
+     * @return
+     */
+    @Override
+    public List<FriendVo> friendList(String userId) {
+        List<LlmUser> llmList = list(new LambdaQueryWrapper<LlmUser>()
+                .eq(LlmUser::getUserId, userId));
+
+        return llmList.stream()
+                .map(llmUser -> {
+                    FriendVo friendVo = new FriendVo();
+
+                    friendVo.setRole(ChatRoleConstant.LLM);
+                    friendVo.setOnline(Boolean.TRUE);
+                    friendVo.setUsername(llmUser.getLlmName());
+                    friendVo.setUserId(llmUser.getId());
+                    friendVo.setNickname(llmUser.getLlmName());
+                    friendVo.setFaceImage(llmUser.getFaceImage());
+
+                    return friendVo;
+                })
+                .toList();
+    }
+
+    /**
+     * 删除llm好友
+     * @param llmId
+     */
+    @Override
+    public void deleteFriend(String llmId) {
+        String userId = LoginUserHolder.getUserId();
+
+        // 删除数据库相关信息
+        removeById(llmId);
+
+        llmChatMsgService.remove(new LambdaQueryWrapper<LlmChatMsg>()
+                .eq(LlmChatMsg::getLlmId, llmId).eq(LlmChatMsg::getSendUserId, userId));
+
+        // 删除向量库相关信息
+        chatClient.deleteMsg(userId, llmId);
+    }
+
+    /**
+     * 聊天主lu
+     * @param llmId
+     * @param msgContent
+     * @return
+     */
+    @Override
+    public LlmChatMsgVo llmChat(String llmId, String msgContent) {
+        String userId = LoginUserHolder.getUserId();
+
+        // 保存用户消息
+        LlmChatMsg llmChatMsgHuman = buildLlmChatMsg(msgContent, llmId, userId, true);
+        llmChatMsgService.save(llmChatMsgHuman);
+
+        ChatMsgTo chatMsg = new ChatMsgTo();
+        chatMsg.setLlmId(llmId);
+        chatMsg.setMsgContent(msgContent);
+        chatMsg.setUserId(userId);
+
+        String resultJson = chatClient.chatMsg(chatMsg);
+
+        log.info("接收到消息：{}", resultJson);
+
+        M<String> msg = JSON.parseObject(resultJson, new TypeReference<M<String>>() {});
+        String data = msg.getData();
+
+        // 保存模型消息
+        LlmChatMsg llmChatMsgAi = buildLlmChatMsg(data, llmId, userId, false);
+        llmChatMsgService.save(llmChatMsgAi);
+
+        LlmChatMsgVo chatMsgVo = new LlmChatMsgVo();
+
+        chatMsgVo.setMsg(data);
+
+        return chatMsgVo;
+    }
+
+    private LlmChatMsg buildLlmChatMsg(String msgContent, String llmId, String userId, Boolean isHuman) {
+        LlmChatMsg chatMsg = new LlmChatMsg();
+
+        chatMsg.setMsgContent(msgContent);
+        chatMsg.setLlmId(llmId);
+        chatMsg.setSendUserId(userId);
+        chatMsg.setIsHuman(isHuman);
+        chatMsg.setCreateTime(LocalDateTime.now());
+
+        return chatMsg;
+    }
+
+    /**
+     * 获取llm聊天历史记录
+     *
+     * @return
+     */
+    @Override
+    public List<LlmMsgHistoryVo> getMsgHistory(String llmId) {
+        String userId = LoginUserHolder.getUserId();
+
+        // 获取与模型得的聊天消息
+        List<LlmChatMsg> llmChatMsgList = llmChatMsgService.getMsgHistory(userId, llmId);
+
+        return llmChatMsgList.stream()
+                .map(llmChatMsg -> {
+                    LlmMsgHistoryVo chatMsgVo = new LlmMsgHistoryVo();
+                    BeanUtils.copyProperties(llmChatMsg, chatMsgVo);
+
+                    return chatMsgVo;
+                })
+                .toList();
+    }
+}
