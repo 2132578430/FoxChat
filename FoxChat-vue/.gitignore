@@ -23,4 +23,4 @@ dist-ssr
 *.sln
 *.sw?
 
-dist_electron/*
+dist_electron/
