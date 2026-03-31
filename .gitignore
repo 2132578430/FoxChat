@@ -1,14 +1,12 @@
-# IDE files
+
 .idea/
 .vscode/
 *.swp
 *.iml
 
-# OS files
 .DS_Store
 Thumbs.db
 
-# Project specific ignores (if not handled in subdirectories)
 **/node_modules/
 **/target/
 **/build/
