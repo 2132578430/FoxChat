@@ -129,10 +129,42 @@ async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
         for event in events:
             if "time" not in event or not event["time"]:
                 event["time"] = current_time
-        return events
+        return []
     except json.JSONDecodeError:
         logger.warning(f"事件提取 JSON 解析失败: {result}")
         return []
+
+async def _append_to_memory_bank(events: List[dict], user_id: str, llm_id: str) -> None:
+    """
+    将提取的事件追加到 memory_bank
+
+    Args:
+        events: 待追加的事件列表
+        user_id: 用户 ID
+        llm_id: LLM ID
+    """
+    if not events:
+        return
+
+    memory_bank_key = build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id)
+
+    # 获取现有 memory_bank
+    existing = redis_client.get(memory_bank_key)
+    if existing:
+        try:
+            memory_bank = json.loads(existing)
+        except json.JSONDecodeError:
+            logger.warning(f"memory_bank JSON 解析失败: {existing}")
+            memory_bank = []
+    else:
+        memory_bank = []
+
+    # 追加新事件
+    memory_bank.extend(events)
+
+    # 保存回 Redis
+    redis_client.set(memory_bank_key, json.dumps(memory_bank, ensure_ascii=False))
+    logger.debug(f"已追加 {len(events)} 条事件到 memory_bank")
 
 async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
     if recent_msg_size < 30:
