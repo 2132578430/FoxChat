@@ -18,6 +18,10 @@ from app.core.prompts.prompt_template import PromptTemplate
 from app.schemas import ChatMsgTo
 from app.util import loader_util, chroma_util
 
+# 记忆库压缩配置
+MEMORY_BANK_MAX_SIZE = 50
+MEMORY_BANK_COMPRESS_TARGET = 25
+
 
 async def _documents_format(documents: List[Document]) -> str:
     format_str = "["
@@ -165,6 +169,61 @@ async def _append_to_memory_bank(events: List[dict], user_id: str, llm_id: str) 
     # 保存回 Redis
     redis_client.set(memory_bank_key, json.dumps(memory_bank, ensure_ascii=False))
     logger.debug(f"已追加 {len(events)} 条事件到 memory_bank")
+
+async def _compress_memory_bank_if_needed(user_id: str, llm_id: str) -> None:
+    """
+    如果 memory_bank 过长，执行压缩
+
+    Args:
+        user_id: 用户 ID
+        llm_id: LLM ID
+    """
+    memory_bank_key = build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id)
+
+    # 获取当前 memory_bank
+    existing = redis_client.get(memory_bank_key)
+    if not existing:
+        return
+
+    try:
+        memory_bank = json.loads(existing)
+    except json.JSONDecodeError:
+        logger.warning(f"memory_bank JSON 解析失败: {existing}")
+        return
+
+    # 检查是否需要压缩
+    if len(memory_bank) < MEMORY_BANK_MAX_SIZE:
+        return
+
+    logger.info(f"memory_bank 长度 {len(memory_bank)} 超过阈值 {MEMORY_BANK_MAX_SIZE}，开始压缩...")
+
+    # 构建压缩 prompt
+    compress_prompt = f"""将以下记忆库压缩到 {MEMORY_BANK_COMPRESS_TARGET} 条核心事件。
+
+要求：
+- 合并相似事件
+- 保留最重要的关键事件
+- 保持 time、type、content 字段
+- 输出 JSON 数组格式
+- 只输出 JSON 数组，不要其他文字
+
+当前记忆库：
+{json.dumps(memory_bank, ensure_ascii=False, indent=2)}
+
+压缩后的记忆库：
+"""
+
+    # 调用 LLM 压缩
+    llm = await llm_model.get_llm_model("qwen4b_model")
+    compressed = await llm.ainvoke(compress_prompt)
+
+    # 解析并保存
+    try:
+        compressed_memory_bank = json.loads(compressed)
+        redis_client.set(memory_bank_key, json.dumps(compressed_memory_bank, ensure_ascii=False))
+        logger.info(f"memory_bank 压缩完成: {len(memory_bank)} -> {len(compressed_memory_bank)} 条")
+    except json.JSONDecodeError:
+        logger.warning(f"memory_bank 压缩 JSON 解析失败: {compressed}")
 
 async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
     if recent_msg_size < 30:
