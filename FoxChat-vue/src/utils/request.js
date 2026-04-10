@@ -54,6 +54,8 @@ request.interceptors.request.use(
 );
 
 // 响应拦截器
+let isRedirectingToLogin = false;
+
 request.interceptors.response.use(
   response => {
     // 关闭 loading
@@ -93,7 +95,18 @@ request.interceptors.response.use(
         msg = '登录已过期，请重新登录呀~';
         localStorage.removeItem('token');
         localStorage.removeItem('userInfo');
-        router.push('/login');
+        
+        // 避免多次提示和重复跳转
+        if (!isRedirectingToLogin) {
+          isRedirectingToLogin = true;
+          ElMessage.error(msg);
+          router.push('/login');
+          // 延迟重置标志位，确保所有并发请求都已完成
+          setTimeout(() => {
+            isRedirectingToLogin = false;
+          }, 1000);
+        }
+        return Promise.reject(error);
       } else {
         msg = data.msg || '服务器开小差了...';
       }

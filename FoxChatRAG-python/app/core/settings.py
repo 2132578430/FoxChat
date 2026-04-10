@@ -34,6 +34,7 @@ class RedisConfig(BaseModel):
 class ModelApiKey(BaseModel):
     ds_model:str = ""
     kimi_model:str = ""
+    qwen_model:str = ""
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

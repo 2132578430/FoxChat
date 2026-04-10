@@ -107,14 +107,14 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
     public void deleteFriend(String llmId) {
         String userId = LoginUserHolder.getUserId();
 
+        // 先删除向量库相关信息
+        chatClient.deleteMsg(userId, llmId);
+
         // 删除数据库相关信息
         removeById(llmId);
 
         llmChatMsgService.remove(new LambdaQueryWrapper<LlmChatMsg>()
                 .eq(LlmChatMsg::getLlmId, llmId).eq(LlmChatMsg::getSendUserId, userId));
-
-        // 删除向量库相关信息
-        chatClient.deleteMsg(userId, llmId);
     }
 
     /**

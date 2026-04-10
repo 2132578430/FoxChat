@@ -1,6 +1,6 @@
-# FoxChat (狐狸聊天室)
+# FoxChat (狐狸聊天室) - 前端
 
-本项目是一个基于 **Vue 3 + Vite + Electron** 开发的现代化即时通讯及知识库管理 (RAG) 应用。
+本项目是 **FoxChat** 项目的 Vue 3 前端 + Electron 桌面客户端，提供即时通讯和 RAG 知识库功能。
 
 ---
 

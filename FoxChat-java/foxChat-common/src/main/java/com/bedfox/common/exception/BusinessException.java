@@ -1,7 +1,12 @@
 package com.bedfox.common.exception;
 
 import com.bedfox.common.constant.ResultStatusConstant;
+import lombok.Getter;
 
+/**
+ * @author bedFox
+ */
+@Getter
 public class BusinessException extends RuntimeException {
     private final ResultStatusConstant status;
     public BusinessException(ResultStatusConstant status) {
@@ -9,7 +14,4 @@ public class BusinessException extends RuntimeException {
         this.status = status;
     }
 
-    public ResultStatusConstant getStatus() {
-        return status;
-    }
 }

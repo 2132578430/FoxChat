@@ -12,5 +12,7 @@ Thumbs.db
 **/build/
 **/.venv/
 **/__pycache__/
-
 FoxChat-vue/dist_electron/
+FoxChatRAG-python/store/
+
+.aider*

@@ -1,5 +1,4 @@
 import json
-from datetime import datetime
 from typing import List
 
 from fastapi import BackgroundTasks, Request
@@ -11,11 +10,9 @@ from langchain_core.runnables import RunnableLambda
 from loguru import logger
 
 from app.common import ChromaTypeConstant, FileTypeConstant
-from app.common.constant.LLMChatConstant import LLMChatConstant
+from app.common.constant.LLMChatConstant import LLMChatConstant, build_memory_key
 from app.core import llm_model
 from app.core.db.redis_client import redis_client
-from app.core.net import ip_client
-from app.core.prompts.prompt_manager import PromptManager
 from app.core.prompts.prompt_template import PromptTemplate
 from app.schemas import ChatMsgTo
 from app.util import loader_util, chroma_util
@@ -115,30 +112,6 @@ async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id:
     # 存入chroma
     await chroma_util.upload(ChromaTypeConstant.CHAT, documents, source_id, user_id=user_id, llm_id=llm_id)
 
-async def _get_dynamic_content(request: Request) -> dict:
-    dynamic = {
-        "current_time": datetime.now(),
-        "location": "未知",
-        "temperature": "未知",
-        "windspeed": "未知",
-    }
-
-    real_ip = await ip_client.get_read_ip(request)
-    if real_ip in ("127.0.0.1", "localhost", "0.0.0.0"):
-        real_ip = None
-
-    local:dict = await ip_client.get_current_location(real_ip)
-    dynamic["location"] = local.get("location")
-
-    lat = local.get("lat")
-    lon = local.get("lon")
-
-    weather:dict = await ip_client.get_weather(lat, lon)
-    dynamic["weather"] = weather.get("temperature")
-    dynamic["windspeed"] = weather.get("windspeed")
-
-    return dynamic
-
 async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: Request) -> str:
     llm_id = msg.llmId
     msg_content = msg.msgContent
@@ -159,14 +132,42 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     # 开启pip通道
     pip = redis_client.pipeline()
 
+    # 获取角色卡key
+    character_card_key = build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id)
+    core_anchor_key = build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id)
+
     pip.get(init_memory_key)
     pip.lrange(recent_msg_key, 0, 29)
+    pip.get(character_card_key)
+    pip.get(core_anchor_key)
 
     # 运行redis
     result = pip.execute()
 
     init_memory: str = result[0]
     recent_msg: List[str] = result[1]
+    character_card_json: str = result[2]
+    core_anchor_json: str = result[3]
+
+    character_card_examples = ""
+    if character_card_json:
+        try:
+            character_card = json.loads(character_card_json)
+            character_card_examples = character_card.get("mes_example", "")
+        except json.JSONDecodeError:
+            logger.warning(f"角色卡JSON解析失败: {character_card_json}")
+            character_card_examples = ""
+
+    role_declaration = ""
+    core_anchor_text = ""
+    if core_anchor_json:
+        try:
+            core_anchor_obj = json.loads(core_anchor_json)
+            role_declaration = core_anchor_obj.get("role_declaration", "")
+            core_anchor_text = core_anchor_obj.get("core_anchor", "")
+        except json.JSONDecodeError:
+            logger.warning(f"CORE_ANCHOR JSON解析失败: {core_anchor_json}")
+            core_anchor_text = ""
 
     # 将聊天记忆转化为历史消息
     history_msg: List[BaseMessage] = await _build_history_message(recent_msg)
@@ -178,24 +179,18 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
         {"user_id": user_id, "llm_id": llm_id})
     total_memory = await _documents_format(documents)
 
-    # 取出soul提示词
-    soul = await PromptManager.get_prompt("soul.md")
-
-    # 获取当前动态信息
-    dynamic_content = await _get_dynamic_content(request)
-
-    logger.debug(f"当前动态信息：{dynamic_content}")
-
     chain = await _build_chat_chain()
 
     logger.debug("api调用llm最后提示")
     chat_response = await chain.ainvoke({
-        "soul": soul,
-        "init_memory": init_memory,
-        "long_term_memory": total_memory,
+        "role_declaration": role_declaration,
+        "core_anchor": core_anchor_text,
+        "character_card": init_memory if init_memory else "",
+        "mes_example": character_card_examples,
+        "relevant_memories": total_memory,
+        "recent_chat": "",
         "history_msg": history_msg,
-        "dynamic_context": dynamic_content,
-        "chat_msg": msg_content,
+        "user_message": msg_content,
     })
     # 消息回复存入redis
     pip = redis_client.pipeline()
@@ -219,21 +214,19 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     return chat_response
 
 async def delete_msg(user_id: str, llm_id: str) -> None:
-    init_memory_key = (LLMChatConstant.CHAT_MEMORY +
-                       user_id + ":" +
-                       llm_id + ":" +
-                       LLMChatConstant.INIT_MEMORY)
-    recent_msg_key = (LLMChatConstant.CHAT_MEMORY +
-                      user_id + ":" +
-                      llm_id + ":" +
-                      LLMChatConstant.RECENT_MSG)
-    # 先删除redis
+    keys_to_delete = [
+        build_memory_key(LLMChatConstant.RAW_EXPERIENCE, user_id, llm_id),
+        build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id),
+        build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id),
+        build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id),
+        build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id),
+        build_memory_key(LLMChatConstant.INIT_MEMORY, user_id, llm_id),
+        build_memory_key(LLMChatConstant.RECENT_MSG, user_id, llm_id),
+    ]
+    
     pip = redis_client.pipeline()
-
-    pip.delete(init_memory_key)
-    pip.delete(recent_msg_key)
-
+    for key in keys_to_delete:
+        pip.delete(key)
     pip.execute()
-
-    # 再删除chroma
+    
     await chroma_util.delete(ChromaTypeConstant.CHAT, user_id=user_id, llm_id=llm_id)

@@ -31,6 +31,8 @@ spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-star
 spring-cloud-dependencies = { module = "org.springframework.cloud:spring-cloud-dependencies", version.ref = "spring-cloud" }
 spring-cloud-starter-openfeign = { module = "org.springframework.cloud:spring-cloud-starter-openfeign" }
 spring-cloud-starter-loadbalancer = { module = "org.springframework.cloud:spring-cloud-starter-loadbalancer" }
+spring-cloud-starter-alibaba-sentinel = { module = "com.alibaba.cloud:spring-cloud-starter-alibaba-sentinel" }
+#implementation("com.alibaba.cloud:spring-cloud-starter-alibaba-sentinel:2025.1.0.0")
 
 # Database
 mybatis-plus-boot-starter = { module = "com.baomidou:mybatis-plus-spring-boot3-starter", version.ref = "mybatis-plus" }

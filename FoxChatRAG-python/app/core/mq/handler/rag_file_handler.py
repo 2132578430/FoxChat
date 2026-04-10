@@ -16,5 +16,5 @@ async def rag_file_handler(message, db: AsyncSession):
         await upload_vector_service.upload_file(message.body, db)
         await message.ack()
     except Exception as e:
-        logger.error(f"rag文件处理错误: {e}")
+        logger.exception(f"rag文件处理错误")
         await message.nack(requeue=True)

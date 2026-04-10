@@ -98,7 +98,7 @@
                     <span class="file-time">{{ formatDateOnly(file.createTime) }}</span>
                     <div class="file-tags">
                       <el-tag v-if="file.score !== undefined && file.score !== null" :type="getScoreTagType(file.score)" size="small" effect="plain" class="score-tag">
-                        {{ getScoreLabel(file.score) }} {{ (file.score * 100).toFixed(1) }}%
+                        {{ getScoreLabel(file.score) }} {{ file.score.toFixed(2) }}
                       </el-tag>
                       <el-tag v-if="file.status !== undefined" :type="getFileStatusType(file.status)" size="small" effect="dark" class="status-tag">
                         {{ getFileStatusLabel(file.status) }}
@@ -172,7 +172,7 @@
             type="primary" 
             class="fox-btn send-btn" 
             @click="sendMessage"
-            :disabled="showRag && isSearchingRag"
+            :disabled="!inputMessage.trim() || (showRag && isSearchingRag)"
           >
             <template v-if="showRag && isSearchingRag">
               <el-icon class="loading-icon"><Loading /></el-icon>
@@ -311,6 +311,24 @@
       </template>
     </el-dialog>
 
+    <!-- Add LLM Friend Dialog -->
+    <el-dialog v-model="showAddLlmFriendDialog" title="添加陪伴者" width="400px" center destroy-on-close>
+      <el-form :model="addLlmFriendForm" ref="addLlmFriendFormRef" label-width="80px">
+        <el-form-item label="名字" prop="nickname" :rules="[{ required: true, message: '请输入名字', trigger: 'blur' }, { max: 30, message: '名字不能超过30个字', trigger: 'blur' }]">
+          <el-input v-model="addLlmFriendForm.nickname" placeholder="请输入陪伴者的名字" maxlength="30" show-word-limit></el-input>
+        </el-form-item>
+        <el-form-item label="经历" prop="experience" :rules="[{ required: true, message: '请输入经历', trigger: 'blur' }, { max: 10000, message: '经历不能超过10000个字', trigger: 'blur' }]">
+          <el-input v-model="addLlmFriendForm.experience" type="textarea" :rows="6" placeholder="请输入陪伴者的经历" maxlength="10000" show-word-limit></el-input>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="showAddLlmFriendDialog = false">取消</el-button>
+          <el-button type="primary" @click="handleAddLlmFriend" :loading="isAddingLlmFriend">添加</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <!-- Upload Document Dialog -->
     <el-dialog v-model="showUploadDialog" title="狐狸知识库上传" width="500px" center destroy-on-close>
       <div class="upload-dialog-content">
@@ -354,7 +372,11 @@
           ></el-input>
         </div>
         <div class="friend-group">
-          <!-- <div class="group-title" v-if="isSearching">🔍</div> -->
+          <div class="group-header" style="justify-content: flex-end;">
+            <el-tooltip content="添加陪伴者" placement="top">
+              <el-button circle size="small" :icon="Plus" @click="showAddLlmFriendDialog = true"></el-button>
+            </el-tooltip>
+          </div>
           
           <div v-if="isSearching && searchResultList.length === 0" class="no-result">
             未找到相关用户
@@ -470,6 +492,7 @@ const profileInfo = ref({
 });
 const searchGroupText = ref('');
 const showCreateGroupDialog = ref(false);
+const showAddLlmFriendDialog = ref(false);
 const showRag = ref(false);
 const ragFiles = ref([]); // RAG 文件列表
 const showUploadDialog = ref(false);
@@ -606,16 +629,18 @@ const getFileStatusType = (status) => {
   return typeMap[status] || 'info';
 };
 
-// 获取匹配度标签类型
+// 获取匹配度标签类型（适配余弦距离：分数越低越相似）
 const getScoreTagType = (score) => {
-  if (score >= 0.7) return 'success';
-  return 'warning';
+  if (score <= 1.25) return 'success';
+  if (score <= 1.45) return 'warning';
+  return 'danger';
 };
 
 // 获取匹配度文字
 const getScoreLabel = (score) => {
-  if (score >= 0.7) return '高匹配';
-  return '低匹配';
+  if (score <= 1.25) return '强相关';
+  if (score <= 1.45) return '中等相关';
+  return '弱相关';
 };
 const isSelectionMode = ref(false);
 const selectedMessageIds = ref([]);
@@ -2021,6 +2046,12 @@ const createGroupForm = reactive({
   groupName: ''
 });
 const createGroupFormRef = ref(null);
+const addLlmFriendForm = reactive({
+  nickname: '',
+  experience: ''
+});
+const addLlmFriendFormRef = ref(null);
+const isAddingLlmFriend = ref(false);
 
 const handleCreateGroup = async () => {
   if (!createGroupFormRef.value) return;
@@ -2042,6 +2073,32 @@ const handleCreateGroup = async () => {
         ElMessage.error(error.message || '网络错误，创建失败');
       } finally {
         isCreatingGroup.value = false;
+      }
+    }
+  });
+};
+
+const handleAddLlmFriend = async () => {
+  if (!addLlmFriendFormRef.value) return;
+  
+  await addLlmFriendFormRef.value.validate(async (valid) => {
+    if (valid) {
+      isAddingLlmFriend.value = true;
+      try {
+        const dto = {
+          nickname: addLlmFriendForm.nickname,
+          experience: addLlmFriendForm.experience
+        };
+        await request.post('/llm/add', dto);
+        ElMessage.success('陪伴者添加成功！');
+        showAddLlmFriendDialog.value = false;
+        addLlmFriendForm.nickname = '';
+        addLlmFriendForm.experience = '';
+        getFriendList();
+      } catch (error) {
+        console.error('添加陪伴者失败:', error);
+      } finally {
+        isAddingLlmFriend.value = false;
       }
     }
   });
@@ -2309,7 +2366,6 @@ const handleLogout = () => {
   height: 44px;
   font-size: 15px;
   border-radius: 12px;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2326,10 +2382,8 @@ const handleLogout = () => {
 }
 
 .fox-btn:hover, .upload-btn:hover, .send-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px var(--accent-hover);
-  background: var(--accent-color);
-  opacity: 0.9;
+  background: var(--button-bg) !important;
+  opacity: 1 !important;
 }
 
 .fox-btn:active, .send-btn:active {
@@ -2918,18 +2972,22 @@ const handleLogout = () => {
   background-color: var(--button-bg);
   border-color: var(--button-bg);
   color: var(--button-text);
-  transition: all 0.3s;
 }
 
 :deep(.el-button--primary:hover),
 :deep(.el-button--primary:focus) {
-  background-color: var(--button-hover);
-  border-color: var(--button-hover);
+  background-color: var(--button-bg);
+  border-color: var(--button-bg);
   color: var(--button-text);
-  opacity: 0.9;
 }
 
 :deep(.el-button--primary.is-disabled) {
+  background-color: var(--button-bg);
+  border-color: var(--button-bg);
+  opacity: 0.5;
+}
+
+:deep(.el-button--primary.is-disabled:hover) {
   background-color: var(--button-bg);
   border-color: var(--button-bg);
   opacity: 0.5;
