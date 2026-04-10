@@ -100,6 +100,40 @@ async def _build_event_extractor_chain():
 
     return chain
 
+async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
+    """
+    从对话历史中提取关键事件
+
+    Args:
+        recent_msg_list: 最近对话的 JSON 字符串列表
+
+    Returns:
+        提取的事件列表，每条事件包含 time、type、content 字段
+    """
+    if not recent_msg_list:
+        return []
+
+    # 构建对话历史文本
+    chat_history = "\n".join(recent_msg_list)
+
+    # 调用 LLM 提取事件
+    chain = await _build_event_extractor_chain()
+    result = await chain.ainvoke({"chat_history": chat_history})
+
+    # 解析 JSON 字符串
+    try:
+        events = json.loads(result)
+        # 添加当前时间戳
+        from datetime import datetime
+        current_time = datetime.now().strftime("%Y-%m-%d")
+        for event in events:
+            if "time" not in event or not event["time"]:
+                event["time"] = current_time
+        return events
+    except json.JSONDecodeError:
+        logger.warning(f"事件提取 JSON 解析失败: {result}")
+        return []
+
 async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
     if recent_msg_size < 30:
         return
