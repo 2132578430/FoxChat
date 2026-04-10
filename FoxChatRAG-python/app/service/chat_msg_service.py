@@ -1,4 +1,5 @@
 import json
+import re
 from typing import List
 
 from fastapi import BackgroundTasks, Request
@@ -36,7 +37,7 @@ async def _build_chat_chain():
         [
             ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
             MessagesPlaceholder("history_msg"),
-            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：{chat_msg}")
+            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：{user_message}")
         ]
     )
 
@@ -83,6 +84,22 @@ async def _build_summary_chain():
 
     return chain
 
+async def _build_event_extractor_chain():
+    """
+    构建事件提取 chain，用于从对话中提取关键事件
+    """
+    template = ChatPromptTemplate([
+        ("system", PromptTemplate.MEMORY_EVENT_EXTRACTOR_PROMPT),
+        ("human", "{chat_history}")
+    ])
+
+    str_parser = StrOutputParser()
+    llm = await llm_model.get_llm_model("qwen4b_model")
+
+    chain = template | llm | str_parser
+
+    return chain
+
 async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
     if recent_msg_size < 30:
         return
@@ -102,7 +119,7 @@ async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id:
     # 总结消息
     chain = await _build_summary_chain()
 
-    summary_msg = await chain.ainvoke({"chat_msg": recent_msg_list})
+    summary_msg = await chain.ainvoke({"chat_history_msg": recent_msg_list})
 
     # 分割摘要
     documents = await loader_util.load_file(summary_msg, FileTypeConstant.STR)
@@ -153,7 +170,7 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     if character_card_json:
         try:
             character_card = json.loads(character_card_json)
-            character_card_examples = character_card.get("mes_example", "")
+            character_card_examples = character_card.get("示例对话", "")
         except json.JSONDecodeError:
             logger.warning(f"角色卡JSON解析失败: {character_card_json}")
             character_card_examples = ""
@@ -161,13 +178,13 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     role_declaration = ""
     core_anchor_text = ""
     if core_anchor_json:
-        try:
-            core_anchor_obj = json.loads(core_anchor_json)
-            role_declaration = core_anchor_obj.get("role_declaration", "")
-            core_anchor_text = core_anchor_obj.get("core_anchor", "")
-        except json.JSONDecodeError:
-            logger.warning(f"CORE_ANCHOR JSON解析失败: {core_anchor_json}")
-            core_anchor_text = ""
+        role_declaration_match = re.search(r'【角色声明】\s*(.+?)(?=【角色核心锚点】|$)', core_anchor_json, re.DOTALL)
+        if role_declaration_match:
+            role_declaration = role_declaration_match.group(1).strip()
+        
+        core_anchor_match = re.search(r'【角色核心锚点】\s*(.+?)(?=【绝对边界】|$)', core_anchor_json, re.DOTALL)
+        if core_anchor_match:
+            core_anchor_text = core_anchor_match.group(1).strip()
 
     # 将聊天记忆转化为历史消息
     history_msg: List[BaseMessage] = await _build_history_message(recent_msg)
