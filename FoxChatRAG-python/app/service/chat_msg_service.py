@@ -241,18 +241,23 @@ async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id:
     recent_msg_list: list[str] = result[0]
     recent_msg_list.reverse()
 
-    # 总结消息
+    # 1. 原有逻辑：总结消息存入 Chroma
     chain = await _build_summary_chain()
-
     summary_msg = await chain.ainvoke({"chat_history_msg": recent_msg_list})
 
-    # 分割摘要
     documents = await loader_util.load_file(summary_msg, FileTypeConstant.STR)
-
     source_id = user_id + llm_id + summary_msg
-
-    # 存入chroma
     await chroma_util.upload(ChromaTypeConstant.CHAT, documents, source_id, user_id=user_id, llm_id=llm_id)
+
+    # 2. 新增：从对话中提取事件
+    events = await _extract_memory_events(recent_msg_list)
+
+    # 3. 新增：追加到 memory_bank
+    if events:
+        await _append_to_memory_bank(events, user_id, llm_id)
+
+    # 4. 新增：检查并压缩（如需要）
+    await _compress_memory_bank_if_needed(user_id, llm_id)
 
 async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: Request) -> str:
     llm_id = msg.llmId
