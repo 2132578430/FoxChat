@@ -12,9 +12,12 @@ from loguru import logger
 
 from app.common import ChromaTypeConstant, FileTypeConstant
 from app.common.constant.LLMChatConstant import LLMChatConstant, build_memory_key
+from app.common.constant.MsgStatusConstant import MsgStatusConstant
 from app.core import llm_model
 from app.core.db.redis_client import redis_client
+from app.core.prompts.prompt_manager import PromptManager
 from app.core.prompts.prompt_template import PromptTemplate
+from app.exception.BusinessException import BusinessException
 from app.schemas import ChatMsgTo
 from app.util import loader_util, chroma_util
 
@@ -69,7 +72,7 @@ async def _build_history_message(recent_msg: List[str]) -> List[BaseMessage]:
         elif role == "ai":
             history_msg.append(AIMessage(content))
         else:
-            raise Exception(f"Unknown role: {role}")
+            raise BusinessException(MsgStatusConstant.UNKNOWN_ROLE_ERROR)
 
     return history_msg
 
@@ -407,7 +410,9 @@ async def _save_user_profile(profile: Dict, user_id: str, llm_id: str) -> bool:
     try:
         profile_key = build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id)
         profile_json = json.dumps(profile, ensure_ascii=False)
+
         redis_client.set(profile_key, profile_json)
+
         logger.info(f"user_profile 更新成功: user_id={user_id}, llm_id={llm_id}")
         return True
     except Exception as e:
@@ -422,26 +427,17 @@ async def _build_profile_updater_chain():
     Returns:
         LangChain 的 Runnable 对象
     """
-    from app.core import settings
-    import os
+    prompt_template = await PromptManager.get_prompt("user_profile_updater")
     
-    # 读取 prompt 模板
-    prompt_path = os.path.join(
-        settings.PROMPT_PATH, "user_profile_updater.md"
-    )
+    if not prompt_template:
+        from app.exception.BusinessException import BusinessException
+        from app.common.constant.MsgStatusConstant import MsgStatusConstant
+        raise BusinessException(MsgStatusConstant.RAG_MESSAGE_EXAM_ERROR)
     
-    if not os.path.exists(prompt_path):
-        raise FileNotFoundError(f"Prompt 文件不存在: {prompt_path}")
-    
-    with open(prompt_path, 'r', encoding='utf-8') as f:
-        prompt_template = f.read()
-    
-    # 构建 prompt
     template = ChatPromptTemplate([
         ("system", prompt_template),
     ])
     
-    # 构建 chain
     llm = await llm_model.get_llm_model("json_ds_model")
     chain = template | llm
     
