@@ -1,6 +1,6 @@
 import json
 import re
-from typing import List
+from typing import Dict, List, Optional
 
 from fastapi import BackgroundTasks, Request
 from langchain_core.documents import Document
