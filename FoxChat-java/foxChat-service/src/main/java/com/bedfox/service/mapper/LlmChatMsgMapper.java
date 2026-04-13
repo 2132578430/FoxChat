@@ -14,7 +14,7 @@ import java.util.List;
 */
 public interface LlmChatMsgMapper extends BaseMapper<LlmChatMsg> {
 
-    List<LlmChatMsg> getMsgHistory(@Param("userId") String userId, @Param("llmId") String llmId);
+    List<LlmChatMsg> getMsgHistory(@Param("userId") String userId, @Param("llmId") String llmId, @Param("lastTime") Long lastTime);
 }
 
 

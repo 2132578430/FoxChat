@@ -1,6 +1,7 @@
 package com.bedfox.web.controller;
 
 import com.bedfox.pojo.dto.AddLlmFriendDto;
+import com.bedfox.pojo.dto.LlmMsgHistoryReqDto;
 import com.bedfox.service.service.LlmUserService;
 import com.bedfox.common.util.R;
 import com.bedfox.pojo.vo.LlmChatMsgVo;
@@ -39,9 +40,12 @@ public class LLMChatController {
         return R.ok();
     }
 
-    @GetMapping("/history")
-    public R<List<LlmMsgHistoryVo>> getMsgHistory(@RequestParam("llmId") String llmId) {
-        List<LlmMsgHistoryVo> list = llmUserService.getMsgHistory(llmId);
+    @PostMapping("/history")
+    public R<List<LlmMsgHistoryVo>> getMsgHistory(@RequestBody LlmMsgHistoryReqDto reqDto) {
+        List<LlmMsgHistoryVo> list = llmUserService.getMsgHistory(
+            reqDto.getLlmId(), 
+            reqDto.getLastTime()
+        );
 
         return R.ok(list);
     }

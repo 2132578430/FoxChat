@@ -12,5 +12,5 @@ import java.util.List;
 */
 public interface LlmChatMsgService extends IService<LlmChatMsg> {
 
-    List<LlmChatMsg> getMsgHistory(String userId, String llmId);
+    List<LlmChatMsg> getMsgHistory(String userId, String llmId, Long lastTime);
 }

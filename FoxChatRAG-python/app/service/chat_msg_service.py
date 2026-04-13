@@ -1,6 +1,7 @@
+import asyncio
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from fastapi import BackgroundTasks, Request
 from langchain_core.documents import Document
@@ -18,12 +19,94 @@ from app.core.db.redis_client import redis_client
 from app.core.prompts.prompt_manager import PromptManager
 from app.core.prompts.prompt_template import PromptTemplate
 from app.exception.BusinessException import BusinessException
-from app.schemas import ChatMsgTo
-from app.util import loader_util, chroma_util
+from app.schemas import ChatMsgTo, MessageBlock
+from app.util import loader_util, chroma_util, escape_template
 
 # 记忆库压缩配置
 MEMORY_BANK_MAX_SIZE = 50
 MEMORY_BANK_COMPRESS_TARGET = 25
+
+
+# =============== 消息块解析相关 ===============
+
+from app.schemas import MessageBlock
+
+
+def strip_think_tags(content: str) -> str:
+    """
+    去除消息中的 <think>...</think> 标签及其内容
+
+    Args:
+        content: LLM 返回的原始消息内容
+
+    Returns:
+        去除 think 标签后的纯文本
+    """
+    if not content:
+        return ""
+    # 匹配 <think>...</think> 标签及其中内容（贪婪模式整个匹配）
+    return re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+
+
+def parse_action_tags(content: str) -> List[MessageBlock]:
+    """
+    解析消息中的 <action> 标签，将消息分割成多个消息块
+
+    解析规则：
+    - 文本1<action>标签</action>文本2 -> text: {text: 文本1}, action_text: {action: 标签, text: 文本2}
+    - <action>标签</action>文本2 -> action_text: {action: 标签, text: 文本2}
+    - 文本1<action>标签</action> -> text: {text: 文本1}, action_only: {action: 标签}
+    - <action>标签1</action><action>标签2</action> -> action_only: {action: 标签1}, action_only: {action: 标签2}
+    - 纯文本 -> text: {text: 文本}
+
+    Args:
+        content: LLM 返回的原始消息内容
+
+    Returns:
+        消息块列表，每个块包含 type、action、text
+    """
+    if not content:
+        return []
+
+    # 正则匹配所有 <action>...</action> 标签及其位置
+    pattern = r'<action>(.*?)</action>'
+    matches = list(re.finditer(pattern, content, re.DOTALL))
+
+    if not matches:
+        # 没有 action 标签，返回普通文本块
+        return [MessageBlock(type="text", text=content.strip())]
+
+    blocks: List[MessageBlock] = []
+
+    # 处理第一个 action 之前的文本
+    first_action_start = matches[0].start()
+    if first_action_start > 0:
+        before_text = content[:first_action_start].strip()
+        if before_text:
+            blocks.append(MessageBlock(type="text", text=before_text))
+
+    for i, match in enumerate(matches):
+        action_text = match.group(1).strip()
+        match_end = match.end()
+
+        # 获取 action 标签之后的文本（直到下一个 action 或字符串末尾）
+        if i < len(matches) - 1:
+            next_match_start = matches[i + 1].start()
+            after_text = content[match_end:next_match_start].strip()
+        else:
+            after_text = content[match_end:].strip()
+
+        if after_text:
+            # action 之后有文本 -> action_text 类型
+            blocks.append(MessageBlock(type="action_text", action=action_text, text=after_text))
+        else:
+            # action 之后没有文本 -> action_only 类型
+            blocks.append(MessageBlock(type="action", action=action_text, text=None))
+
+    return blocks
+
+# Chain 对象缓存（避免重复创建）
+_CHAIN_CACHE: Dict[str, Any] = {}
 
 
 async def _documents_format(documents: List[Document]) -> str:
@@ -49,7 +132,7 @@ async def _build_chat_chain():
     )
 
     str_parser = StrOutputParser()
-    llm = await llm_model.get_llm_model("ds_model")
+    llm = await llm_model.get_chat_model()
 
     chain = template | RunnableLambda(print_template) | llm | str_parser
 
@@ -85,7 +168,7 @@ async def _build_summary_chain():
     )
 
     str_parser = StrOutputParser()
-    llm = await llm_model.get_llm_model("qwen4b_model")
+    llm = await llm_model.get_summary_model()
 
     chain = template | llm | str_parser
 
@@ -101,7 +184,7 @@ async def _build_event_extractor_chain():
     ])
 
     str_parser = StrOutputParser()
-    llm = await llm_model.get_llm_model("qwen4b_model")
+    llm = await llm_model.get_extraction_model()
 
     chain = template | llm | str_parser
 
@@ -130,7 +213,7 @@ async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
         for event in events:
             if "time" not in event or not event["time"]:
                 event["time"] = current_time
-        return []
+        return events
     except json.JSONDecodeError:
         logger.warning(f"事件提取 JSON 解析失败: {result}")
         return []
@@ -210,7 +293,7 @@ async def _compress_memory_bank_if_needed(user_id: str, llm_id: str) -> None:
     """
 
     # 调用 LLM 压缩
-    llm = await llm_model.get_llm_model("qwen4b_model")
+    llm = await llm_model.get_memory_model()
     compressed = await llm.ainvoke(compress_prompt)
 
     # 解析并保存
@@ -244,7 +327,7 @@ async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id:
         "recent_msg_list": recent_msg_list
     })
 
-    documents = await loader_util.load_file(summary_msg, FileTypeConstant.STR)
+    documents = loader_util.load_file(summary_msg, FileTypeConstant.STR)
     source_id = user_id + llm_id + summary_msg
     await chroma_util.upload(ChromaTypeConstant.CHAT, documents, source_id, user_id=user_id, llm_id=llm_id)
 
@@ -261,7 +344,7 @@ async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id:
     # 5. 新增：更新 user_profile
     await _update_user_profile_in_compress(user_id, llm_id, recent_msg_list)
 
-async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: Request) -> str:
+async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: Request) -> List[MessageBlock]:
     llm_id = msg.llmId
     msg_content = msg.msgContent
     user_id = msg.userId
@@ -330,8 +413,12 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
 
     chain = await _build_chat_chain()
 
+    # 加载角色灵魂（Soul）
+    soul = await PromptManager.get_soul("soul")
+
     logger.debug("api调用llm最后提示")
     chat_response = await chain.ainvoke({
+        "soul": soul if soul else "",
         "role_declaration": role_declaration,
         "core_anchor": core_anchor_text,
         "character_card": init_memory if init_memory else "",
@@ -360,24 +447,29 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     # 开启任务线程，总结消息
     background_tasks.add_task(_async_summary_msg, recent_msg_key, result[0], user_id, llm_id)
 
-    return chat_response
+    # 先去除 think 标签，再解析 action 标签，返回结构化消息块
+    clean_response = strip_think_tags(chat_response)
+    message_blocks = parse_action_tags(clean_response)
+
+    return message_blocks
 
 
 # =============== User Profile 更新相关函数 ===============
 
-from typing import Optional
+PROFILE_REQUIRED_DIMENSIONS = ["核心身份", "核心性格", "语言风格", "互动模式", "价值观", "长期兴趣", "绝对边界"]
 
 
 async def _get_user_profile(user_id: str, llm_id: str) -> Optional[Dict]:
-    """
-    从 Redis 获取当前 user_profile
+    """从 Redis 获取用户画像数据。
+    
+    根据用户ID和LLM ID构建缓存键，从Redis中查询并解析用户画像。
     
     Args:
-        user_id: 用户ID
-        llm_id: LLM ID
+        user_id: 用户唯一标识
+        llm_id: LLM实例标识
         
     Returns:
-        user_profile 字典，如果不存在则返回 None
+        用户画像字典对象，查询失败或不存在时返回 None
     """
     profile_key = build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id)
     profile_json = redis_client.get(profile_key)
@@ -396,23 +488,21 @@ async def _get_user_profile(user_id: str, llm_id: str) -> Optional[Dict]:
 
 
 async def _save_user_profile(profile: Dict, user_id: str, llm_id: str) -> bool:
-    """
-    将更新后的 user_profile 保存到 Redis
+    """将用户画像数据持久化到 Redis。
+    
+    将更新后的用户画像序列化为JSON并存储到Redis缓存中。
     
     Args:
-        profile: 更新后的 user_profile 字典
-        user_id: 用户ID
-        llm_id: LLM ID
+        profile: 用户画像字典对象
+        user_id: 用户唯一标识
+        llm_id: LLM实例标识
         
     Returns:
-        是否保存成功
+        保存成功返回 True，失败返回 False
     """
     try:
         profile_key = build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id)
-        profile_json = json.dumps(profile, ensure_ascii=False)
-
-        redis_client.set(profile_key, profile_json)
-
+        redis_client.set(profile_key, json.dumps(profile, ensure_ascii=False))
         logger.info(f"user_profile 更新成功: user_id={user_id}, llm_id={llm_id}")
         return True
     except Exception as e:
@@ -421,75 +511,98 @@ async def _save_user_profile(profile: Dict, user_id: str, llm_id: str) -> bool:
 
 
 async def _build_profile_updater_chain():
-    """
-    构建 user_profile 更新 chain
+    """获取用户画像更新 Chain（带缓存）。
+    
+    整合 Prompt 模板和 LLM 模型，构建用于更新用户画像的 LangChain Chain。
+    首次调用时创建 Chain 并缓存，后续调用直接返回缓存对象。
     
     Returns:
-        LangChain 的 Runnable 对象
+        LangChain Runnable 对象，用于执行用户画像更新任务
+        
+    Raises:
+        BusinessException: 当 Prompt 模板不存在时抛出业务异常
     """
+    cache_key = "profile_updater"
+    
+    # 检查缓存
+    if cache_key in _CHAIN_CACHE:
+        logger.debug("使用缓存的 profile_updater Chain")
+        return _CHAIN_CACHE[cache_key]
+    
+    # 缓存未命中，创建新 Chain
     prompt_template = await PromptManager.get_prompt("user_profile_updater")
+    
+    # 转义模板，防止JSON中的大括号与变量占位符冲突
+    prompt_template = escape_template(prompt_template, ["current_profile", "chat_history"])
     
     if not prompt_template:
         from app.exception.BusinessException import BusinessException
         from app.common.constant.MsgStatusConstant import MsgStatusConstant
         raise BusinessException(MsgStatusConstant.RAG_MESSAGE_EXAM_ERROR)
     
-    template = ChatPromptTemplate([
-        ("system", prompt_template),
-    ])
-    
-    llm = await llm_model.get_llm_model("json_ds_model")
+    template = ChatPromptTemplate([("system", prompt_template)])
+    llm = await llm_model.get_memory_json_model()
     chain = template | llm
     
+    # 存入缓存
+    _CHAIN_CACHE[cache_key] = chain
+    logger.info("已创建并缓存 profile_updater Chain")
+    
     return chain
+
+
+def _validate_profile_structure(profile: Dict) -> bool:
+    """验证用户画像结构完整性。
+    
+    检查用户画像是否包含所有必需的顶层维度字段。
+    
+    Args:
+        profile: 待验证的用户画像字典
+        
+    Returns:
+        结构验证通过返回 True，缺少必需字段时返回 False
+    """
+    missing_dims = [d for d in PROFILE_REQUIRED_DIMENSIONS if d not in profile]
+    if missing_dims:
+        logger.warning(f"user_profile 缺少维度: {missing_dims}")
+        return False
+    return True
 
 
 async def _update_user_profile(
     current_profile: Dict,
     recent_msg_list: List[str]
 ) -> Optional[Dict]:
-    """
-    基于对话历史更新 user_profile
+    """基于对话历史更新用户画像。
+    
+    通过 LLM 分析最近的对话内容，提取用户特征并更新画像。
     
     Args:
-        current_profile: 当前 user_profile
+        current_profile: 当前用户画像字典
         recent_msg_list: 最近对话历史列表
         
     Returns:
-        更新后的 user_profile，如果没有更新则返回当前 profile，失败返回 None
+        更新后的用户画像，校验失败或无更新时返回原始 profile，异常时返回 None
     """
     if not recent_msg_list:
         logger.debug("对话历史为空，跳过 user_profile 更新")
         return current_profile
     
     try:
-        # 构建 chain
         chain = await _build_profile_updater_chain()
         
-        # 准备输入
-        chat_history = "\n".join(recent_msg_list)
-        current_profile_json = json.dumps(current_profile, ensure_ascii=False)
-        
-        # 调用 LLM
         result = await chain.ainvoke({
-            "current_profile": current_profile_json,
-            "chat_history": chat_history
+            "current_profile": json.dumps(current_profile, ensure_ascii=False),
+            "chat_history": "\n".join(recent_msg_list)
         })
         
-        # 解析结果
         updated_profile = json.loads(result.content)
         
-        # 验证结构完整性
         if not _validate_profile_structure(updated_profile):
             logger.warning("user_profile 更新后的结构不完整，保留原数据")
             return current_profile
         
-        # 判断是否真正有更新
-        if updated_profile == current_profile:
-            logger.debug("对话中无有价值的新信息，user_profile 保持不变")
-        else:
-            logger.info("user_profile 已更新")
-        
+        logger.info("user_profile 已更新")
         return updated_profile
         
     except json.JSONDecodeError as e:
@@ -500,104 +613,67 @@ async def _update_user_profile(
         return current_profile
 
 
-def _validate_profile_structure(profile: Dict) -> bool:
-    """
-    验证 user_profile 结构完整性
-    
-    Args:
-        profile: 待验证的 user_profile
-        
-    Returns:
-        是否验证通过
-    """
-    required_dimensions = [
-        "核心身份",
-        "核心性格", 
-        "语言风格",
-        "互动模式",
-        "价值观",
-        "长期兴趣",
-        "绝对边界"
-    ]
-    
-    # 检查所有必需维度
-    for dimension in required_dimensions:
-        if dimension not in profile:
-            logger.warning(f"user_profile 缺少维度: {dimension}")
-            return False
-    
-    # 检查每个维度的子字段
-    # 这是一个可选的增强检查，可以根据需要启用
-    required_sub_fields = {
-        "核心身份": ["姓名", "年龄", "职业", "与AI关系"],
-        "核心性格": ["主导性格", "矛盾侧面", "小缺点"],
-        "语言风格": ["口头禅", "语气词", "句式习惯"],
-        "互动模式": ["开启话题", "安慰方式", "开玩笑"],
-        "价值观": ["人生态度", "底线", "讨厌事物"],
-        "长期兴趣": ["爱好", "喜欢", "讨厌"],
-        "绝对边界": ["绝不说", "绝不做"]
-    }
-    
-    for dimension, sub_fields in required_sub_fields.items():
-        for sub_field in sub_fields:
-            if sub_field not in profile.get(dimension, {}):
-                logger.warning(f"user_profile.{dimension} 缺少字段: {sub_field}")
-                # 这个检查可以根据严格程度决定是否返回 False
-                # 当前实现允许部分字段缺失
-    
-    return True
-
-
 async def _update_user_profile_in_compress(
     user_id: str, 
     llm_id: str, 
     recent_msg_list: List[str]
 ) -> None:
-    """
-    在消息压缩时更新 user_profile
+    """在消息压缩流程中协调用户画像更新。
     
-    这是 _async_summary_msg 的辅助函数，负责协调 user_profile 的更新流程。
+    作为后台任务的一部分，负责查询、更新和保存用户画像的完整流程。
+    当消息数量达到压缩阈值时被调用。
+    
+    使用 asyncio.gather 实现查询 profile 和构建 LLM Chain 的并行执行，
+    减少等待时间，提升整体响应速度。
     
     Args:
-        user_id: 用户ID
-        llm_id: LLM ID
-        recent_msg_list: 最近对话历史列表
+        user_id: 用户唯一标识
+        llm_id: LLM实例标识
+        recent_msg_list: 待处理的最近对话历史列表
     """
-    # 检查输入有效性
     if not recent_msg_list:
         logger.debug(f"最近消息列表为空，跳过 user_profile 更新: user_id={user_id}")
         return
     
     try:
-        # 获取当前 user_profile
-        current_profile = await _get_user_profile(user_id, llm_id)
+        # 并行执行：查询 profile 和构建 LLM Chain（无依赖关系，可同时进行）
+        current_profile, chain = await asyncio.gather(
+            _get_user_profile(user_id, llm_id),
+            _build_profile_updater_chain()
+        )
         
         if not current_profile:
             logger.info(f"当前 user_profile 不存在，无法更新: user_id={user_id}")
             return
         
-        logger.debug(f"开始更新 user_profile: user_id={user_id}, 消息数={len(recent_msg_list)}")
+        logger.debug(f"开始更新 user_profile: user_id={user_id}")
         
-        # 执行更新
-        updated_profile = await _update_user_profile(current_profile, recent_msg_list)
+        # 调用 LLM 更新画像
+        result = await chain.ainvoke({
+            "current_profile": json.dumps(current_profile, ensure_ascii=False),
+            "chat_history": "\n".join(recent_msg_list)
+        })
         
-        if updated_profile:
-            # 检查是否真正有变化
-            if updated_profile == current_profile:
-                logger.debug(f"user_profile 无变化，无需保存: user_id={user_id}")
-            else:
-                # 保存更新后的 profile
-                success = await _save_user_profile(updated_profile, user_id, llm_id)
-                if success:
-                    logger.info(f"user_profile 更新成功: user_id={user_id}")
-                else:
-                    logger.error(f"user_profile 保存失败: user_id={user_id}")
+        try:
+            updated_profile = json.loads(result.content)
+        except json.JSONDecodeError as json_err:
+            logger.error(f"JSON 解析失败: {str(json_err)[:100]}, LLM返回: {str(result.content)[:200]}")
+            return
+        
+        if not _validate_profile_structure(updated_profile):
+            logger.warning("user_profile 更新后的结构不完整，保留原数据")
+            return
+        
+        # 保存更新后的画像
+        success = await _save_user_profile(updated_profile, user_id, llm_id)
+        if success:
+            logger.info(f"user_profile 更新成功: user_id={user_id}")
         else:
-            logger.warning(f"user_profile 更新返回 None，保留原数据: user_id={user_id}")
+            logger.error(f"user_profile 保存失败: user_id={user_id}")
             
     except Exception as e:
-        logger.error(f"user_profile 更新过程中发生错误: {e}, user_id={user_id}", exc_info=True)
-        # 发生错误时不应影响压缩流程的继续执行
+        logger.error(f"user_profile 更新过程中发生错误: {str(e)[:200]}")
+        logger.debug(f"user_id={user_id}, 异常类型: {type(e).__name__}")
 
 async def delete_msg(user_id: str, llm_id: str) -> None:
     keys_to_delete = [

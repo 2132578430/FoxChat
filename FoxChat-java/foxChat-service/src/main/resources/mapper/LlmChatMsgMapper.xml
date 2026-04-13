@@ -22,6 +22,10 @@
         SELECT *
         FROM llm_chat_msg
         WHERE llm_id = #{llmId} AND send_user_id = #{userId}
-        ORDER BY create_time
+        <if test="lastTime != null">
+            AND create_time &lt; #{lastTime}
+        </if>
+        ORDER BY create_time ASC, id ASC
+        LIMIT 20
     </select>
 </mapper>

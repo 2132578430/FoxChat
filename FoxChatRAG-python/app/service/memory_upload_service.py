@@ -8,22 +8,7 @@ from app.common.constant.LLMChatConstant import LLMChatConstant, build_memory_ke
 from app.core import redis_client
 from app.core.llm_model.model import LLM_MAP
 from app.core.prompts.prompt_manager import PromptManager
-
-
-def _escape_template(template: str, var_names: list[str]) -> str:
-    """
-    模板脱离方法
-    当JSON和提示词注入字段冲突时，需要先将提示词中的JSON格式转义出来
-    """
-    for name in var_names:
-        template = template.replace(f"{{{name}}}", f"__VAR_{name}__")
-
-    template = template.replace("{", "{{").replace("}", "}}")
-
-    for name in var_names:
-        template = template.replace(f"__VAR_{name}__", f"{{{name}}}")
-
-    return template
+from app.util import escape_template
 
 
 async def _call_llm(prompt_template: str, variables: dict, model_name: str = "ds_model") -> str:
@@ -40,7 +25,7 @@ async def _call_llm(prompt_template: str, variables: dict, model_name: str = "ds
     """
     prompt_str = await PromptManager.get_prompt(prompt_template)
     # 去除模板语法，防止语法冲突
-    prompt_str = _escape_template(prompt_str, list(variables.keys()))
+    prompt_str = escape_template(prompt_str, list(variables.keys()))
     prompt = ChatPromptTemplate.from_messages([("human", prompt_str)])
 
     llm = LLM_MAP.get(model_name)

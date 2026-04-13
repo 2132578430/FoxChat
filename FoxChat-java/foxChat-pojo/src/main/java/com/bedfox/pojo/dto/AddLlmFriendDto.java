@@ -9,5 +9,7 @@ import lombok.Data;
 @Data
 public class AddLlmFriendDto {
     public String nickname;
+    public String myName;
+    public String partnerName;
     public String experience;
 }

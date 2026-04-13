@@ -28,6 +28,9 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import com.bedfox.common.util.TimeUtil;
+
+
 /**
 * @author 21325
 * @description 针对表【llm_user】的数据库操作Service实现
@@ -55,10 +58,16 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
     public void saveFriend(AddLlmFriendDto friendDto) {
         String userId = LoginUserHolder.getUserId();
         LlmUser llm = new LlmUser();
+        String myName = friendDto.getMyName();
+        String partnerName = friendDto.getPartnerName();
         String experience = friendDto.getExperience();
 
+        // 拼接主语信息，降低模型识别错主人的概率
+        String nicknamePrompt = "如果这个名字已经是爱称或昵称（如宝贝、小可爱等），则无需生成简称；如果像王大锤这样是正式名字，则生成1-3个简短的昵称供你使用。";
+        String fullExperience = "以下为你与我的经历。你应该称呼我为" + myName + "，你的名字是" + partnerName + "。你与我的经历：" + experience + ". 要求：" + nicknamePrompt;
+
         llm.setLlmName(friendDto.getNickname());
-        llm.setMemoryContent(experience);
+        llm.setMemoryContent(fullExperience);
         llm.setUserId(userId);
 
         // 保存模型
@@ -68,10 +77,12 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
         ChatMqMsgTo chatMqMsgTo = new ChatMqMsgTo();
 
         chatMqMsgTo.setUserId(userId);
-        chatMqMsgTo.setExperience(experience);
+        chatMqMsgTo.setExperience(fullExperience);
         chatMqMsgTo.setLlmId(llm.getId());
 
         mqUtil.sendChatMsg(chatMqMsgTo);
+
+        System.out.println(chatMqMsgTo);
     }
 
     /**
@@ -172,11 +183,11 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
      * @return
      */
     @Override
-    public List<LlmMsgHistoryVo> getMsgHistory(String llmId) {
+    public List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime) {
         String userId = LoginUserHolder.getUserId();
 
         // 获取与模型得的聊天消息
-        List<LlmChatMsg> llmChatMsgList = llmChatMsgService.getMsgHistory(userId, llmId);
+        List<LlmChatMsg> llmChatMsgList = llmChatMsgService.getMsgHistory(userId, llmId, lastTime);
 
         return llmChatMsgList.stream()
                 .map(llmChatMsg -> {

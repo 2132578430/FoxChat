@@ -135,15 +135,27 @@
             <el-checkbox v-if="isSelectionMode && msg.isMine" v-model="msg.selected" @change="handleSelectionChange(msg)"></el-checkbox>
             <div class="message-item" :class="{ 'mine': msg.isMine }">
               <el-avatar :size="38" :src="resolveAvatarUrl(msg.isMine ? (userInfo.faceImage || userInfo.face_image) : (msg.senderAvatar || currentFriend.faceImage || currentFriend.face_image)) || defaultUserAvatar" class="msg-avatar"></el-avatar>
-              
+
               <div class="msg-bubble-wrapper">
                 <!-- 外部顶部：时间 -->
                 <div class="bubble-external-time">{{ formatTime(msg.createTime) }}</div>
-                
-                <div class="msg-bubble">
-                  <!-- 内容 -->
+
+                <!-- 普通文本消息 -->
+                <div v-if="!msg.blocks" class="msg-bubble">
                   <div class="bubble-content">{{ msg.content || msg.msg }}</div>
                 </div>
+
+                <!-- 结构化消息块（AI回复，带渐进显示延迟） -->
+                <template v-else v-for="(block, blockIndex) in msg.blocks" :key="blockIndex">
+                  <!-- 动作标签 -->
+                  <div v-if="(block.type === 'action' || block.type === 'action_text') && blockIndex < msg.visibleBlockCount" class="action-tag">
+                    ○ {{ block.action }}
+                  </div>
+                  <!-- 文字内容 -->
+                  <div v-if="(block.type === 'text' || block.type === 'action_text') && block.text && blockIndex < msg.visibleBlockCount" class="msg-bubble">
+                    <div class="bubble-content">{{ block.text }}</div>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
@@ -156,7 +168,7 @@
           :rows="4"
           placeholder="请输入消息..."
           resize="none"
-          @keydown.enter.prevent="sendMessage"
+          @keydown.enter="handleInputEnter"
         ></el-input>
         <div class="input-actions">
           <el-button 
@@ -314,11 +326,17 @@
     <!-- Add LLM Friend Dialog -->
     <el-dialog v-model="showAddLlmFriendDialog" title="添加陪伴者" width="400px" center destroy-on-close>
       <el-form :model="addLlmFriendForm" ref="addLlmFriendFormRef" label-width="80px">
-        <el-form-item label="名字" prop="nickname" :rules="[{ required: true, message: '请输入名字', trigger: 'blur' }, { max: 30, message: '名字不能超过30个字', trigger: 'blur' }]">
-          <el-input v-model="addLlmFriendForm.nickname" placeholder="请输入陪伴者的名字" maxlength="30" show-word-limit></el-input>
+        <el-form-item label="昵称" prop="nickname" :rules="[{ required: true, message: '请输入昵称', trigger: 'blur' }, { max: 30, message: '昵称不能超过30个字', trigger: 'blur' }]">
+          <el-input v-model="addLlmFriendForm.nickname" placeholder="他/她的网名叫什么" maxlength="30" show-word-limit></el-input>
+        </el-form-item>
+        <el-form-item label="我是" prop="myName" :rules="[{ required: true, message: '请输入您的名字', trigger: 'blur' }, { max: 30, message: '名字不能超过30个字', trigger: 'blur' }]">
+          <el-input v-model="addLlmFriendForm.myName" placeholder="你想被他/她称为什么" maxlength="30" show-word-limit></el-input>
+        </el-form-item>
+        <el-form-item label="他/她是" prop="partnerName" :rules="[{ required: true, message: '请输入陪伴者昵称', trigger: 'blur' }, { max: 30, message: '昵称不能超过30个字', trigger: 'blur' }]">
+          <el-input v-model="addLlmFriendForm.partnerName" placeholder="陪伴者的名字" maxlength="30" show-word-limit></el-input>
         </el-form-item>
         <el-form-item label="经历" prop="experience" :rules="[{ required: true, message: '请输入经历', trigger: 'blur' }, { max: 10000, message: '经历不能超过10000个字', trigger: 'blur' }]">
-          <el-input v-model="addLlmFriendForm.experience" type="textarea" :rows="6" placeholder="请输入陪伴者的经历" maxlength="10000" show-word-limit></el-input>
+          <el-input v-model="addLlmFriendForm.experience" type="textarea" :rows="6" placeholder='"我与他/她"的经历' maxlength="10000" show-word-limit></el-input>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -1103,9 +1121,24 @@ const handleMessage = async (rawInput) => {
           await sendBinaryMessage(encodeProtocol(signMsg));
         }
 
+        // 尝试解析 msg 是否为结构化 blocks 格式
+        let blocks = null;
+        let content = chatMsg.msg;
+        try {
+          const parsed = typeof chatMsg.msg === 'string' ? JSON.parse(chatMsg.msg) : chatMsg.msg;
+          if (Array.isArray(parsed)) {
+            blocks = parsed;
+            content = null;
+          }
+        } catch (e) {
+          // 解析失败，保持原有 content 格式
+        }
+
         messageList.value.push({
             id: msgId || Date.now(),
-            content: chatMsg.msg,
+            content: content,
+            blocks: blocks,
+            visibleBlockCount: 1, // 首个块立即显示，后续块渐进出现
             isMine: false,
             type: 'text',
             createTime: chatMsg.createTime || new Date().toISOString(), // 确保有时间
@@ -1115,6 +1148,22 @@ const handleMessage = async (rawInput) => {
           });
         nextTick(() => {
           scrollToBottom();
+          // 渐进显示后续块，每隔1秒显示下一个
+          if (blocks && blocks.length > 1) {
+            let msgIndex = messageList.value.length - 1;
+            let nextBlock = 1;
+            const revealTimer = setInterval(() => {
+              if (nextBlock >= blocks.length) {
+                clearInterval(revealTimer);
+                return;
+              }
+              if (messageList.value[msgIndex]) {
+                messageList.value[msgIndex].visibleBlockCount = nextBlock + 1;
+              }
+              nextBlock++;
+              scrollToBottom();
+            }, 1000);
+          }
         });
       } 
       // 情况B：如果是自己发的消息（多端同步或服务器回显）
@@ -1473,12 +1522,12 @@ const selectFriend = async (friend) => {
   if (targetId) {
     // 如果是老朋友 LLM，从 /llm/history 获取聊天历史
     if (friend.role === 1 || friend.isOldFriend) {
-      hasMoreHistory.value = false; // 假设一次性拉取全部，不需要上拉加载
       try {
-        const res = await request.get('/llm/history', {
-          params: { llmId: targetId }
+        const res = await request.post('/llm/history', {
+          llmId: targetId,
+          lastTime: null
         });
-        
+
         let historyList = [];
         if (res && res.data && Array.isArray(res.data)) {
           historyList = res.data;
@@ -1487,17 +1536,55 @@ const selectFriend = async (friend) => {
         }
 
         // 将后端返回的 LlmMsgHistoryVo 转换为前端需要的消息格式
-        messageList.value = historyList.map(msg => ({
-          id: msg.id,
-          content: msg.msgContent,
-          isMine: msg.isHuman, // isHuman 为 true 表示是用户自己发的消息
-          type: 'text',
-          createTime: msg.createTime,
-          senderId: msg.isHuman ? msg.sendUserId : msg.llmId,
-          senderName: msg.isHuman ? (userInfo.nickname || userInfo.username) : (friend.nickname || friend.username),
-          senderAvatar: msg.isHuman ? resolveAvatarUrl(userInfo.faceImage || userInfo.face_image) : resolveAvatarUrl(friend.faceImage || friend.face_image)
-        }));
-        
+        messageList.value = historyList.map(msg => {
+          // 尝试解析 msgContent 是否为结构化 blocks 格式
+          let blocks = null;
+          let content = msg.msgContent;
+          try {
+            const parsed = typeof msg.msgContent === 'string' ? JSON.parse(msg.msgContent) : msg.msgContent;
+            if (Array.isArray(parsed)) {
+              blocks = parsed;
+              content = null;
+            }
+          } catch (e) {
+            // 解析失败，保持原有 content 格式
+          }
+
+          return {
+            id: msg.id,
+            content: content,
+            blocks: blocks,
+            visibleBlockCount: blocks ? blocks.length : 0, // 历史消息直接全量显示
+            isMine: msg.isHuman, // isHuman 为 true 表示是用户自己发的消息
+            type: 'text',
+            createTime: msg.createTime,
+            senderId: msg.isHuman ? msg.sendUserId : msg.llmId,
+            senderName: msg.isHuman ? (userInfo.nickname || userInfo.username) : (friend.nickname || friend.username),
+            senderAvatar: msg.isHuman ? resolveAvatarUrl(userInfo.faceImage || userInfo.face_image) : resolveAvatarUrl(friend.faceImage || friend.face_image)
+          };
+        });
+
+        // 更新分页状态
+        if (historyList.length < 20) {
+          hasMoreHistory.value = false;
+        } else {
+          hasMoreHistory.value = true;
+          // 设置 lastTimestamp 为最旧消息的时间戳，用于下次滚动加载
+          const oldestMsg = historyList[historyList.length - 1];
+          if (oldestMsg && oldestMsg.createTime) {
+            let timestamp;
+            const timeValue = oldestMsg.createTime;
+            if (!isNaN(timeValue) && typeof timeValue !== 'boolean') {
+              timestamp = Number(timeValue);
+            } else {
+              timestamp = new Date(timeValue).getTime();
+            }
+            if (!isNaN(timestamp)) {
+              lastTimestamp.value = timestamp;
+            }
+          }
+        }
+
         nextTick(() => {
           scrollToBottom();
         });
@@ -1600,16 +1687,23 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
     console.log(`发起历史记录请求 -> targetId: ${targetId}, type: ${currentChatType.value}, timestamp: ${lastTimestamp.value}`);
     
     let data;
-    if (currentChatType.value === 'group') {
+    if (currentFriend.value && (currentFriend.value.role === 1 || currentFriend.value.isOldFriend)) {
+      // LLM 聊天历史（滚动分页）
+      const res = await request.post('/llm/history', {
+        llmId: targetId,
+        lastTime: lastTimestamp.value
+      });
+      data = (res && res.data) ? res.data : (Array.isArray(res) ? res : []);
+    } else if (currentChatType.value === 'group') {
       console.log('调用 groupApi.getGroupChatHistory...');
       data = await groupApi.getGroupChatHistory({
         groupId: targetId,
         lastTimestamp: lastTimestamp.value
       });
     } else {
-      data = await messageApi.getChatHistory({ 
+      data = await messageApi.getChatHistory({
         friendId: targetId,
-        lastTimestamp: lastTimestamp.value 
+        lastTimestamp: lastTimestamp.value
       });
     }
     
@@ -1783,6 +1877,17 @@ const formatDateOnly = (timeValue) => {
   }
 };
 
+// 处理输入框回车键：Shift+Enter 换行，Enter 发送
+const handleInputEnter = (e) => {
+  if (e.shiftKey) {
+    // Shift+Enter：允许换行（textarea 默认行为）
+    return;
+  }
+  // Enter 发送
+  e.preventDefault();
+  sendMessage();
+};
+
 const sendMessage = async () => {
   console.log('[Send] sendMessage called');
   if (!inputMessage.value.trim()) {
@@ -1836,20 +1941,60 @@ const sendMessage = async () => {
       });
 
       // 3. 渲染回复
-      let replyContent = "我好像走神了，能再说一遍吗？";
+      let replyBlocks = null;
       if (typeof res === 'string') {
-        replyContent = res;
-      } else if (res && res.msg) { // 拦截器已解包，res 就是后端返回的 data 对象 { msg: "..." }
-        replyContent = res.msg;
-      } else if (res && res.data && res.data.msg) { // 拦截器未解包，res 是完整的 R 对象
-        replyContent = res.data.msg;
+        replyBlocks = [{ type: 'text', text: res }];
+      } else if (res && res.msg) {
+        // 拦截器已解包，res 就是后端返回的 data 对象 { msg: "..." }
+        // res.msg 是 JSON 字符串，需要解析是否为 blocks 数组
+        try {
+          const parsed = typeof res.msg === 'string' ? JSON.parse(res.msg) : res.msg;
+          if (Array.isArray(parsed)) {
+            replyBlocks = parsed;
+          } else {
+            replyBlocks = [{ type: 'text', text: res.msg }];
+          }
+        } catch (e) {
+          replyBlocks = [{ type: 'text', text: res.msg }];
+        }
+      } else if (res && Array.isArray(res)) {
+        // 新格式：res 是 blocks 数组
+        replyBlocks = res;
+      } else if (res && res.data) {
+        // res 是 M.get_msg() 返回的对象 { msgId: "...", data: "..." } 或 { msgId: "...", data: [...] }
+        const dataContent = res.data;
+        if (typeof dataContent === 'string') {
+          // data 是 JSON 字符串，需要解析
+          try {
+            replyBlocks = JSON.parse(dataContent);
+          } catch (e) {
+            replyBlocks = [{ type: 'text', text: dataContent }];
+          }
+        } else if (Array.isArray(dataContent)) {
+          // data 已经是数组
+          replyBlocks = dataContent;
+        } else if (dataContent.msg) {
+          // dataContent.msg 是 JSON 字符串，需要解析是否为 blocks 数组
+          const msgContent = dataContent.msg;
+          try {
+            const parsed = typeof msgContent === 'string' ? JSON.parse(msgContent) : msgContent;
+            if (Array.isArray(parsed)) {
+              replyBlocks = parsed;
+            } else {
+              replyBlocks = [{ type: 'text', text: msgContent }];
+            }
+          } catch (e) {
+            replyBlocks = [{ type: 'text', text: msgContent }];
+          }
+        }
       }
-      
+
       // 只有当当前选中的好友还是刚才发请求的那位时，才把消息推入当前的 messageList
       if (currentFriend.value && (currentFriend.value.userId || currentFriend.value.id) === requestFriendId) {
         messageList.value.push({
           id: snowflake.nextId(),
-          content: replyContent,
+          content: null,
+          blocks: replyBlocks,
           isMine: false,
           type: 'text',
           createTime: new Date().toISOString(),
@@ -2048,6 +2193,8 @@ const createGroupForm = reactive({
 const createGroupFormRef = ref(null);
 const addLlmFriendForm = reactive({
   nickname: '',
+  myName: '',
+  partnerName: '',
   experience: ''
 });
 const addLlmFriendFormRef = ref(null);
@@ -2080,19 +2227,23 @@ const handleCreateGroup = async () => {
 
 const handleAddLlmFriend = async () => {
   if (!addLlmFriendFormRef.value) return;
-  
+
   await addLlmFriendFormRef.value.validate(async (valid) => {
     if (valid) {
       isAddingLlmFriend.value = true;
       try {
         const dto = {
           nickname: addLlmFriendForm.nickname,
+          myName: addLlmFriendForm.myName,
+          partnerName: addLlmFriendForm.partnerName,
           experience: addLlmFriendForm.experience
         };
         await request.post('/llm/add', dto);
         ElMessage.success('陪伴者添加成功！');
         showAddLlmFriendDialog.value = false;
         addLlmFriendForm.nickname = '';
+        addLlmFriendForm.myName = '';
+        addLlmFriendForm.partnerName = '';
         addLlmFriendForm.experience = '';
         getFriendList();
       } catch (error) {
@@ -2746,6 +2897,14 @@ const handleLogout = () => {
 
 .message-item:not(.mine) .msg-bubble {
   border-top-left-radius: 4px;
+}
+
+.action-tag {
+  font-size: 12px;
+  color: #999;
+  font-style: italic;
+  margin-bottom: 4px;
+  padding: 0 4px;
 }
 
 .bubble-content {

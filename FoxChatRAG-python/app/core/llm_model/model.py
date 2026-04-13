@@ -118,6 +118,12 @@ kimi_model = ChatOpenAI(
     base_url = "https://api.moonshot.cn/v1",
 )
 
+claude_opus_model = ChatOpenAI(
+    model = "claude-opus-4.6",
+    api_key=SecretStr(global_settings.key.claude_model),  # Claude API Key
+    base_url="https://api.anthropic.com/v1"  # Claude 端点
+)
+
 qwen4b_model = ChatOllama(
     model="qwen3:4b ",
 )
@@ -127,28 +133,170 @@ rerank_model = FlashrankRerank(model="ms-marco-MiniLM-L-12-v2",
                                client=Ranker(model_name="ms-marco-MiniLM-L-12-v2"))
 
 # MiniMax 模型配置
-# miniMax_model = ChatOpenAI(
-#     model="MiniMax-Text-01",
-#     api_key=SecretStr("your_minimax_api_key"),
-#     base_url="https://api.minimax.chat/v1",
-# )
-# miniMax_json_model = ChatOpenAI(
-#     model="MiniMax-Text-01",
-#     api_key=SecretStr("your_minimax_api_key"),
-#     base_url="https://api.minimax.chat/v1",
-#     model_kwargs={"response_format": {"type": "json_object"}}
-# )
-# LLM_MAP["minimax_model"] = miniMax_model
-# LLM_MAP["minimax_json_model"] = miniMax_json_model
+minimax_model = ChatOpenAI(
+    model="MiniMax-M2.7",
+    api_key=SecretStr(global_settings.key.minimax_model),
+    base_url="https://api.minimax.chat/v1",
+)
+minimax_json_model = ChatOpenAI(
+    model="MiniMax-M2.7",
+    api_key=SecretStr(global_settings.key.minimax_model),
+    base_url="https://api.minimax.chat/v1",
+    model_kwargs={"response_format": {"type": "json_object"}}
+)
+
+# GLM 模型配置 (智谱AI GLM-4)
+glm_model = ChatOpenAI(
+    model="glm-5",
+    api_key=SecretStr(global_settings.key.glm_model),
+    base_url="https://open.bigmodel.cn/api/paas/v4",
+)
+glm_json_model = ChatOpenAI(
+    model="glm-5",
+    api_key=SecretStr(global_settings.key.glm_model),
+    base_url="https://open.bigmodel.cn/api/paas/v4",
+    model_kwargs={"response_format": {"type": "json_object"}}
+)
 
 LLM_MAP = {
     "ds_model": ds_model,
     "json_ds_model": json_ds_model,
     "kimi_model": kimi_model,
     "qwen4b_model": qwen4b_model,
+    "minimax_model": minimax_model,
+    "minimax_json_model": minimax_json_model,
+    "claude_model": claude_opus_model,
+    "glm_model": glm_model,
+    "glm_json_model": glm_json_model,
 }
 
 async def get_llm_model(llm_name: str):
-    logger.debug(f"key:{global_settings.key.ds_model}")
+    """获取 LLM 模型实例。
+
+    Args:
+        llm_name: 模型名称，支持以下选项：
+            - "default" 或空字符串: 返回配置的默认模型
+            - "ds_model": DeepSeek 标准模型
+            - "json_ds_model": DeepSeek JSON 输出模型
+            - "kimi_model": Kimi 模型
+            - "minimax_model": MiniMax 标准模型
+            - "minimax_json_model": MiniMax JSON 输出模型
+            - "qwen4b_model": Qwen 4B 本地模型
+            - "glm_model": GLM 标准模型 (智谱AI)
+            - "glm_json_model": GLM JSON 输出模型 (智谱AI)
+
+    Returns:
+        LLM 模型实例，如果模型不存在返回 None
+    """
+    # 如果未指定或为 "default"，使用配置的默认模型
+    if not llm_name or llm_name == "default":
+        llm_name = global_settings.model.default_llm
+        logger.debug(f"使用默认模型: {llm_name}")
+    elif llm_name == "default_json":
+        llm_name = global_settings.model.default_json_llm
+        logger.debug(f"使用默认 JSON 模型: {llm_name}")
+    
     return LLM_MAP.get(llm_name)
+
+
+def get_default_llm_name() -> str:
+    """获取当前配置的默认 LLM 模型名称。
+    
+    Returns:
+        默认模型名称字符串
+    """
+    return global_settings.model.default_llm
+
+
+def get_default_json_llm_name() -> str:
+    """获取当前配置的默认 JSON 输出 LLM 模型名称。
+
+    Returns:
+        默认 JSON 模型名称字符串
+    """
+    return global_settings.model.default_json_llm
+
+
+def _resolve_model_name(config_name: str) -> str:
+    """解析模型名称，处理默认值的回退逻辑。
+
+    Args:
+        config_name: 配置中的模型名称
+
+    Returns:
+        解析后的模型名称
+    """
+    if config_name == "default":
+        return global_settings.model.default_llm
+    elif config_name == "default_json":
+        return global_settings.model.default_json_llm
+    elif config_name == "default_embedding":
+        return global_settings.model.default_embedding
+    return config_name
+
+
+async def get_chat_model():
+    """获取聊天场景的 LLM。
+
+    Returns:
+        聊天模型实例
+    """
+    model_name = _resolve_model_name(global_settings.model_by_scenario.chat_llm)
+    logger.debug(f"获取聊天模型: {model_name}")
+    return LLM_MAP.get(model_name)
+
+
+async def get_chat_json_model():
+    """获取聊天 JSON 场景的 LLM。
+
+    Returns:
+        聊天 JSON 模型实例
+    """
+    model_name = _resolve_model_name(global_settings.model_by_scenario.chat_json_llm)
+    logger.debug(f"获取聊天 JSON 模型: {model_name}")
+    return LLM_MAP.get(model_name)
+
+
+async def get_memory_model():
+    """获取记忆场景的 LLM。
+
+    Returns:
+        记忆模型实例
+    """
+    model_name = _resolve_model_name(global_settings.model_by_scenario.memory_llm)
+    logger.debug(f"获取记忆模型: {model_name}")
+    return LLM_MAP.get(model_name)
+
+
+async def get_memory_json_model():
+    """获取记忆 JSON 场景的 LLM。
+
+    Returns:
+        记忆 JSON 模型实例
+    """
+    model_name = _resolve_model_name(global_settings.model_by_scenario.memory_json_llm)
+    logger.debug(f"获取记忆 JSON 模型: {model_name}")
+    return LLM_MAP.get(model_name)
+
+
+async def get_summary_model():
+    """获取消息总结场景的 LLM。
+
+    Returns:
+        总结模型实例
+    """
+    model_name = _resolve_model_name(global_settings.model_by_scenario.summary_llm)
+    logger.debug(f"获取总结模型: {model_name}")
+    return LLM_MAP.get(model_name)
+
+
+async def get_extraction_model():
+    """获取信息抽取场景的 LLM。
+
+    Returns:
+        抽取模型实例
+    """
+    model_name = _resolve_model_name(global_settings.model_by_scenario.extraction_llm)
+    logger.debug(f"获取抽取模型: {model_name}")
+    return LLM_MAP.get(model_name)
 

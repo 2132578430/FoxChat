@@ -22,8 +22,8 @@ public class LlmChatMsgServiceImpl extends ServiceImpl<LlmChatMsgMapper, LlmChat
     LlmChatMsgMapper llmChatMsgMapper;
 
     @Override
-    public List<LlmChatMsg> getMsgHistory(String userId, String llmId) {
-        return llmChatMsgMapper.getMsgHistory(userId, llmId);
+    public List<LlmChatMsg> getMsgHistory(String userId, String llmId, Long lastTime) {
+        return llmChatMsgMapper.getMsgHistory(userId, llmId, lastTime);
     }
 }
 

@@ -35,6 +35,25 @@ class ModelApiKey(BaseModel):
     ds_model:str = ""
     kimi_model:str = ""
     qwen_model:str = ""
+    minimax_model:str = ""
+    claude_model:str = ""
+    glm_model:str = ""
+
+
+class ModelConfig(BaseModel):
+    default_llm: str = "ds_model"
+    default_json_llm: str = "json_ds_model"
+    default_embedding: str = "dashscope"
+
+
+class ModelByScenario(BaseModel):
+    chat_llm: str = "default"
+    chat_json_llm: str = "default_json"
+    memory_llm: str = "default"
+    memory_json_llm: str = "default_json"
+    summary_llm: str = "default"
+    extraction_llm: str = "default"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -49,5 +68,7 @@ class Settings(BaseSettings):
     server: ServerConfig = ServerConfig()
     redis: RedisConfig = RedisConfig()
     key: ModelApiKey = ModelApiKey()
+    model: ModelConfig = ModelConfig()
+    model_by_scenario: ModelByScenario = ModelByScenario()
 
 global_settings = Settings()
