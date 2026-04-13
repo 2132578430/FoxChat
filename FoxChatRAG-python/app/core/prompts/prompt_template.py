@@ -14,6 +14,15 @@ class PromptTemplate(StrEnum):
     
     【角色详细卡】
     {character_card}
+
+    【角色特征补充】
+    {character_card_detail}
+
+    【用户画像】
+    {user_profile_summary}
+
+    【记忆银行】
+    {memory_bank_summary}
     
     【示例对话风格】
     {mes_example}

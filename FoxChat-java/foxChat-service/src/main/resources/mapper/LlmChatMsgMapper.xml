@@ -19,13 +19,15 @@
         isHuman
     </sql>
     <select id="getMsgHistory" resultType="com.bedfox.pojo.domain.LlmChatMsg">
-        SELECT *
+        SELECT id, send_user_id, create_time, msg_content, llm_id, is_human
         FROM llm_chat_msg
-        WHERE llm_id = #{llmId} AND send_user_id = #{userId}
-        <if test="lastTime != null">
-            AND create_time &lt; #{lastTime}
-        </if>
-        ORDER BY create_time ASC, id ASC
+        WHERE llm_id = #{llmId}
+        AND send_user_id = #{userId}
+        AND (
+             create_time &lt; #{lastTime}
+             OR (create_time = #{lastTime} AND id &lt; #{lastId})
+            )
+        ORDER BY create_time DESC, id DESC
         LIMIT 20
     </select>
 </mapper>

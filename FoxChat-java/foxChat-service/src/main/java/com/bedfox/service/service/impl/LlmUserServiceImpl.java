@@ -129,6 +129,24 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
     }
 
     /**
+     * 更新llm好友信息
+     * @param llmId
+     * @param nickname
+     * @param faceImage
+     */
+    @Override
+    public void updateFriend(String llmId, String nickname, String faceImage) {
+        String userId = LoginUserHolder.getUserId();
+        LlmUser llmUser = getById(llmId);
+        if (llmUser == null || !llmUser.getUserId().equals(userId)) {
+            return;
+        }
+        llmUser.setLlmName(nickname);
+        llmUser.setFaceImage(faceImage);
+        updateById(llmUser);
+    }
+
+    /**
      * 聊天主lu
      * @param llmId
      * @param msgContent
@@ -183,11 +201,12 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
      * @return
      */
     @Override
-    public List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime) {
+    public List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime, Long lastId) {
         String userId = LoginUserHolder.getUserId();
+        LocalDateTime currentTime = TimeUtil.timestampToLdt(lastTime);
 
         // 获取与模型得的聊天消息
-        List<LlmChatMsg> llmChatMsgList = llmChatMsgService.getMsgHistory(userId, llmId, lastTime);
+        List<LlmChatMsg> llmChatMsgList = llmChatMsgService.getMsgHistory(userId, llmId, currentTime, lastId);
 
         return llmChatMsgList.stream()
                 .map(llmChatMsg -> {

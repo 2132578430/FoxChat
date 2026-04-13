@@ -127,7 +127,7 @@ async def _build_chat_chain():
         [
             ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
             MessagesPlaceholder("history_msg"),
-            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：{user_message}")
+            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：\n{user_message}")
         ]
     )
 
@@ -367,11 +367,15 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     # 获取角色卡key
     character_card_key = build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id)
     core_anchor_key = build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id)
+    user_profile_key = build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id)
+    memory_bank_key = build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id)
 
     pip.get(init_memory_key)
     pip.lrange(recent_msg_key, 0, 29)
     pip.get(character_card_key)
     pip.get(core_anchor_key)
+    pip.get(user_profile_key)
+    pip.get(memory_bank_key)
 
     # 运行redis
     result = pip.execute()
@@ -380,15 +384,34 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
     recent_msg: List[str] = result[1]
     character_card_json: str = result[2]
     core_anchor_json: str = result[3]
+    user_profile_json: str = result[4]
+    memory_bank_json: str = result[5]
 
     character_card_examples = ""
+    character_card_detail = ""
     if character_card_json:
         try:
             character_card = json.loads(character_card_json)
             character_card_examples = character_card.get("示例对话", "")
+
+            # 组装角色特征补充字段
+            parts = []
+            if character_card.get("爱称"):
+                parts.append(f"爱称：{', '.join(character_card['爱称'])}")
+            if character_card.get("性格关键词"):
+                parts.append(f"性格关键词：{character_card['性格关键词']}")
+            if character_card.get("动作风格"):
+                parts.append(f"动作风格：{character_card['动作风格']}")
+            if character_card.get("常用动作"):
+                parts.append(f"常用动作：{', '.join(character_card['常用动作'])}")
+            if character_card.get("核心描述"):
+                parts.append(f"核心描述：{character_card['核心描述']}")
+            if parts:
+                character_card_detail = "\n".join(parts)
         except json.JSONDecodeError:
             logger.warning(f"角色卡JSON解析失败: {character_card_json}")
             character_card_examples = ""
+            character_card_detail = ""
 
     role_declaration = ""
     core_anchor_text = ""
@@ -396,10 +419,48 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
         role_declaration_match = re.search(r'【角色声明】\s*(.+?)(?=【角色核心锚点】|$)', core_anchor_json, re.DOTALL)
         if role_declaration_match:
             role_declaration = role_declaration_match.group(1).strip()
-        
+
         core_anchor_match = re.search(r'【角色核心锚点】\s*(.+?)(?=【绝对边界】|$)', core_anchor_json, re.DOTALL)
         if core_anchor_match:
             core_anchor_text = core_anchor_match.group(1).strip()
+
+    # 格式化 user_profile 为可读文本
+    user_profile_summary = ""
+    if user_profile_json:
+        try:
+            up = json.loads(user_profile_json)
+            parts = []
+            for dim_key, dim_val in up.items():
+                if isinstance(dim_val, dict):
+                    items = [f"{k}：{v}" for k, v in dim_val.items() if v and v != "[未提及]"]
+                    if items:
+                        parts.append(f"{dim_key}：{'，'.join(items)}")
+                elif isinstance(dim_val, list):
+                    filtered = [v for v in dim_val if v and v != "[未提及]"]
+                    if filtered:
+                        parts.append(f"{dim_key}：{', '.join(filtered)}")
+                elif dim_val and dim_val != "[未提及]":
+                    parts.append(f"{dim_key}：{dim_val}")
+            if parts:
+                user_profile_summary = "\n".join(parts)
+        except json.JSONDecodeError:
+            logger.warning(f"user_profile JSON解析失败: {user_profile_json}")
+
+    # 格式化 memory_bank 为可读文本
+    memory_bank_summary = ""
+    if memory_bank_json:
+        try:
+            mb = json.loads(memory_bank_json)
+            if isinstance(mb, list) and mb:
+                lines = []
+                for item in mb:
+                    time_val = item.get("time", "某时")
+                    content_val = item.get("content", "")
+                    type_val = item.get("type", "event")
+                    lines.append(f"- [{time_val}]（{type_val}）{content_val}")
+                memory_bank_summary = "\n".join(lines)
+        except json.JSONDecodeError:
+            logger.warning(f"memory_bank JSON解析失败: {memory_bank_json}")
 
     # 将聊天记忆转化为历史消息
     history_msg: List[BaseMessage] = await _build_history_message(recent_msg)
@@ -423,6 +484,9 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks, request: R
         "core_anchor": core_anchor_text,
         "character_card": init_memory if init_memory else "",
         "mes_example": character_card_examples,
+        "character_card_detail": character_card_detail if character_card_detail else "",
+        "user_profile_summary": user_profile_summary if user_profile_summary else "",
+        "memory_bank_summary": memory_bank_summary if memory_bank_summary else "",
         "relevant_memories": total_memory,
         "recent_chat": "",
         "history_msg": history_msg,

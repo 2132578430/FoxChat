@@ -150,6 +150,19 @@ R<T> {
 
 ---
 
+## 🔐 敏感配置
+
+以下文件包含密钥、密码等敏感信息，**请勿提交至 Git**（已列入 `.gitignore`）：
+
+| 文件 | 说明 |
+|------|------|
+| `FoxChatRAG-python/.env` | LLM API Key、MySQL/Redis/RabbitMQ 密码 |
+| `FoxChat-java/deploy/.env` | MySQL/Redis 密码 |
+| `FoxChat-java/**/application-local.yml` | 数据库密码、JWT 密钥、MinIO、邮件授权码 |
+| `FoxChat-vue/.env` | 本地 API 地址 |
+
+首次配置时，参考各模块下的 `.env.example` 文件复制并填写实际值。
+
 ## 🔧 相关文档
 
 - [FoxChat-vue 前端文档](./FoxChat-vue/README.md)

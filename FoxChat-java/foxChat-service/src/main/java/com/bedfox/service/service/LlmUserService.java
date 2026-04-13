@@ -22,7 +22,9 @@ public interface LlmUserService extends IService<LlmUser> {
 
     void deleteFriend(String friendId);
 
+    void updateFriend(String llmId, String nickname, String faceImage);
+
     LlmChatMsgVo llmChat(String llmId, String msgContent);
 
-    List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime);
+    List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime, Long lastId);
 }

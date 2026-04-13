@@ -7,6 +7,7 @@ import com.bedfox.service.service.LlmChatMsgService;
 import jakarta.annotation.Resource;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -22,8 +23,8 @@ public class LlmChatMsgServiceImpl extends ServiceImpl<LlmChatMsgMapper, LlmChat
     LlmChatMsgMapper llmChatMsgMapper;
 
     @Override
-    public List<LlmChatMsg> getMsgHistory(String userId, String llmId, Long lastTime) {
-        return llmChatMsgMapper.getMsgHistory(userId, llmId, lastTime);
+    public List<LlmChatMsg> getMsgHistory(String userId, String llmId, LocalDateTime lastTime, Long lastId) {
+        return llmChatMsgMapper.getMsgHistory(userId, llmId, lastTime, lastId);
     }
 }
 

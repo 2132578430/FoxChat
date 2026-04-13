@@ -145,14 +145,14 @@
                   <div class="bubble-content">{{ msg.content || msg.msg }}</div>
                 </div>
 
-                <!-- 结构化消息块（AI回复，带渐进显示延迟） -->
+                <!-- 结构化消息块（AI回复） -->
                 <template v-else v-for="(block, blockIndex) in msg.blocks" :key="blockIndex">
                   <!-- 动作标签 -->
-                  <div v-if="(block.type === 'action' || block.type === 'action_text') && blockIndex < msg.visibleBlockCount" class="action-tag">
+                  <div v-if="block.type === 'action' || block.type === 'action_text'" class="action-tag">
                     ○ {{ block.action }}
                   </div>
                   <!-- 文字内容 -->
-                  <div v-if="(block.type === 'text' || block.type === 'action_text') && block.text && blockIndex < msg.visibleBlockCount" class="msg-bubble">
+                  <div v-if="(block.type === 'text' || block.type === 'action_text') && block.text" class="msg-bubble">
                     <div class="bubble-content">{{ block.text }}</div>
                   </div>
                 </template>
@@ -347,6 +347,28 @@
       </template>
     </el-dialog>
 
+    <!-- Edit LLM Friend Dialog -->
+    <el-dialog v-model="showEditLlmFriendDialog" title="修改模型" width="400px" center destroy-on-close>
+      <div class="edit-llm-avatar-section">
+        <div class="edit-llm-avatar-wrapper" @click="showAvatarCropper = true">
+          <el-avatar :size="100" :src="resolveAvatarUrl(editLlmFriendForm.faceImage) || defaultUserAvatar"></el-avatar>
+          <div class="edit-llm-avatar-mask">
+            <el-icon :size="24"><UploadFilled /></el-icon>
+            <span>修改头像</span>
+          </div>
+        </div>
+        <div class="edit-llm-nickname">
+          <el-input v-model="editLlmFriendForm.nickname" placeholder="模型昵称" maxlength="30" show-word-limit></el-input>
+        </div>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="showEditLlmFriendDialog = false">取消</el-button>
+          <el-button type="primary" @click="handleUpdateLlmFriend">保存</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <!-- Upload Document Dialog -->
     <el-dialog v-model="showUploadDialog" title="狐狸知识库上传" width="500px" center destroy-on-close>
       <div class="upload-dialog-content">
@@ -457,9 +479,13 @@
     <AvatarCropper v-model:visible="showAvatarCropper" @success="handleAvatarSuccess" />
 
     <!-- Friend Context Menu -->
-    <div v-if="friendContextMenu.show" 
-         class="friend-context-menu" 
+    <div v-if="friendContextMenu.show"
+         class="friend-context-menu"
          :style="{ top: friendContextMenu.y + 'px', left: friendContextMenu.x + 'px' }">
+      <div v-if="friendContextMenu.friend?.role === 1" class="context-menu-item" @click="handleEditLlmFriend">
+        <el-icon><Edit /></el-icon>
+        <span>修改模型</span>
+      </div>
       <div class="context-menu-item delete" @click="handleDeleteFriend">
         <el-icon><Delete /></el-icon>
         <span>删除好友</span>
@@ -471,7 +497,7 @@
 <script setup>
 import { ref, reactive, onMounted, nextTick, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { ChatDotRound, User, SwitchButton, Search, Plus, Select, ChatSquare, UserFilled, Reading, Upload, UploadFilled, Files, Document, Loading, Delete } from '@element-plus/icons-vue';
+import { ChatDotRound, User, SwitchButton, Search, Plus, Select, ChatSquare, UserFilled, Reading, Upload, UploadFilled, Files, Document, Loading, Delete, Edit } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 import { encodeProtocol, decodeProtocol } from '@/utils/protocol'; // 引入协议编解码器
 import snowflake from '@/utils/snowflake'; // 引入雪花ID生成器
@@ -489,6 +515,7 @@ const defaultGroupAvatar = 'https://cube.elemecdn.com/9/c2/f0ee8a3c7c9638a549403
 const router = useRouter();
 const userInfo = reactive(JSON.parse(localStorage.getItem('userInfo') || '{}'));
 const showAvatarCropper = ref(false);
+const isAvatarCropperForLlm = ref(false); // 头像裁剪是否用于模型编辑
 const ws = ref(null);
 const currentFriend = ref({});
 const currentGroup = ref({});
@@ -499,6 +526,7 @@ const messageContainer = ref(null);
 const isLoadingHistory = ref(false);
 const hasMoreHistory = ref(true);
 const lastTimestamp = ref(null);
+const lastMsgId = ref(null);
 const searchText = ref('');
 const showFriendList = ref(false);
 const showGroupList = ref(false);
@@ -511,6 +539,12 @@ const profileInfo = ref({
 const searchGroupText = ref('');
 const showCreateGroupDialog = ref(false);
 const showAddLlmFriendDialog = ref(false);
+const showEditLlmFriendDialog = ref(false);
+const editLlmFriendForm = reactive({
+  llmId: '',
+  nickname: '',
+  faceImage: ''
+});
 const showRag = ref(false);
 const ragFiles = ref([]); // RAG 文件列表
 const showUploadDialog = ref(false);
@@ -561,6 +595,41 @@ const handleDeleteFriend = async () => {
     closeFriendContextMenu();
   }
 };
+
+const handleEditLlmFriend = () => {
+  const f = friendContextMenu.friend;
+  if (!f) return;
+  editLlmFriendForm.llmId = f.userId || f.id || f.llmId;
+  editLlmFriendForm.nickname = f.nickname || '';
+  editLlmFriendForm.faceImage = f.faceImage || f.face_image || '';
+  isAvatarCropperForLlm.value = true;
+  showEditLlmFriendDialog.value = true;
+  closeFriendContextMenu();
+};
+
+const handleUpdateLlmFriend = async () => {
+  try {
+    await friendApi.updateLlmFriend({
+      llmId: editLlmFriendForm.llmId,
+      nickname: editLlmFriendForm.nickname,
+      faceImage: editLlmFriendForm.faceImage
+    });
+    ElMessage.success('模型已更新');
+    getFriendList();
+    // 如果当前聊天对象就是这个模型，刷新当前好友信息
+    const currentId = currentFriend.value?.userId || currentFriend.value?.id;
+    if (currentId && String(currentId) === String(editLlmFriendForm.llmId)) {
+      currentFriend.value.nickname = editLlmFriendForm.nickname;
+      currentFriend.value.faceImage = editLlmFriendForm.faceImage;
+    }
+  } catch (error) {
+    console.error('更新模型失败:', error);
+    ElMessage.error('更新模型失败');
+  } finally {
+    showEditLlmFriendDialog.value = false;
+  }
+};
+
 const isSearchingRag = ref(false); // RAG 搜索状态
 const hasRagSearchResults = ref(false); // 是否显示搜索结果
 const isUploading = ref(false); // 是否正在上传
@@ -735,6 +804,12 @@ watch(showUploadDialog, (val) => {
   }
 });
 
+watch(showAvatarCropper, (val) => {
+  if (!val) {
+    isAvatarCropperForLlm.value = false;
+  }
+});
+
 
 
 // Mock Friend Data (Will replace with API call)
@@ -873,15 +948,19 @@ const handleDeleteMessages = async () => {
 };
 
 const handleEditAvatar = () => {
+  // 标志位由 handleEditLlmFriend / handleEditLlmFriend 设置，无需重复修改
   showAvatarCropper.value = true;
 };
 
 const handleAvatarSuccess = (newAvatarUrl) => {
-  // Update local state
-  if (newAvatarUrl) {
+  if (!newAvatarUrl) return;
+  if (isAvatarCropperForLlm.value) {
+    // 模型编辑头像更新
+    editLlmFriendForm.faceImage = newAvatarUrl;
+  } else {
+    // 个人资料头像更新
     userInfo.faceImage = newAvatarUrl;
     profileInfo.value.faceImage = newAvatarUrl;
-    // Update localStorage
     localStorage.setItem('userInfo', JSON.stringify(userInfo));
   }
 };
@@ -1138,7 +1217,6 @@ const handleMessage = async (rawInput) => {
             id: msgId || Date.now(),
             content: content,
             blocks: blocks,
-            visibleBlockCount: 1, // 首个块立即显示，后续块渐进出现
             isMine: false,
             type: 'text',
             createTime: chatMsg.createTime || new Date().toISOString(), // 确保有时间
@@ -1148,22 +1226,6 @@ const handleMessage = async (rawInput) => {
           });
         nextTick(() => {
           scrollToBottom();
-          // 渐进显示后续块，每隔1秒显示下一个
-          if (blocks && blocks.length > 1) {
-            let msgIndex = messageList.value.length - 1;
-            let nextBlock = 1;
-            const revealTimer = setInterval(() => {
-              if (nextBlock >= blocks.length) {
-                clearInterval(revealTimer);
-                return;
-              }
-              if (messageList.value[msgIndex]) {
-                messageList.value[msgIndex].visibleBlockCount = nextBlock + 1;
-              }
-              nextBlock++;
-              scrollToBottom();
-            }, 1000);
-          }
         });
       } 
       // 情况B：如果是自己发的消息（多端同步或服务器回显）
@@ -1513,10 +1575,11 @@ const selectFriend = async (friend) => {
   
   // 点击好友后，立即清空该好友的未读计数
   friend.unreadCount = 0;
-  
+
   // 重置分页状态
   messageList.value = [];
   lastTimestamp.value = Date.now(); // 初始请求使用当前时间戳
+  lastMsgId.value = null;
   hasMoreHistory.value = true;
 
   if (targetId) {
@@ -1525,7 +1588,8 @@ const selectFriend = async (friend) => {
       try {
         const res = await request.post('/llm/history', {
           llmId: targetId,
-          lastTime: null
+          lastTime: Date.now(),
+          lastId: null
         });
 
         let historyList = [];
@@ -1535,8 +1599,8 @@ const selectFriend = async (friend) => {
           historyList = res;
         }
 
-        // 将后端返回的 LlmMsgHistoryVo 转换为前端需要的消息格式
-        messageList.value = historyList.map(msg => {
+        // 将后端返回的 LlmMsgHistoryVo 转换为前端需要的消息格式（后端返回DESC需reverse成oldest在顶）
+        const mapped = historyList.map(msg => {
           // 尝试解析 msgContent 是否为结构化 blocks 格式
           let blocks = null;
           let content = msg.msgContent;
@@ -1554,35 +1618,24 @@ const selectFriend = async (friend) => {
             id: msg.id,
             content: content,
             blocks: blocks,
-            visibleBlockCount: blocks ? blocks.length : 0, // 历史消息直接全量显示
-            isMine: msg.isHuman, // isHuman 为 true 表示是用户自己发的消息
+            isMine: msg.isHuman,
             type: 'text',
             createTime: msg.createTime,
             senderId: msg.isHuman ? msg.sendUserId : msg.llmId,
             senderName: msg.isHuman ? (userInfo.nickname || userInfo.username) : (friend.nickname || friend.username),
             senderAvatar: msg.isHuman ? resolveAvatarUrl(userInfo.faceImage || userInfo.face_image) : resolveAvatarUrl(friend.faceImage || friend.face_image)
           };
-        });
+        }).reverse();
 
-        // 更新分页状态
-        if (historyList.length < 20) {
-          hasMoreHistory.value = false;
-        } else {
-          hasMoreHistory.value = true;
-          // 设置 lastTimestamp 为最旧消息的时间戳，用于下次滚动加载
-          const oldestMsg = historyList[historyList.length - 1];
-          if (oldestMsg && oldestMsg.createTime) {
-            let timestamp;
-            const timeValue = oldestMsg.createTime;
-            if (!isNaN(timeValue) && typeof timeValue !== 'boolean') {
-              timestamp = Number(timeValue);
-            } else {
-              timestamp = new Date(timeValue).getTime();
-            }
-            if (!isNaN(timestamp)) {
-              lastTimestamp.value = timestamp;
-            }
-          }
+        messageList.value = mapped;
+
+        // 更新分页游标（reverse后，第一条是最旧的）
+        if (mapped.length > 0) {
+          lastMsgId.value = mapped[0].id;
+          const timeValue = mapped[0].createTime;
+          lastTimestamp.value = !isNaN(timeValue) && typeof timeValue !== 'boolean'
+            ? Number(timeValue)
+            : new Date(timeValue).getTime();
         }
 
         nextTick(() => {
@@ -1691,7 +1744,8 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
       // LLM 聊天历史（滚动分页）
       const res = await request.post('/llm/history', {
         llmId: targetId,
-        lastTime: lastTimestamp.value
+        lastTime: lastTimestamp.value,
+        lastId: lastMsgId.value
       });
       data = (res && res.data) ? res.data : (Array.isArray(res) ? res : []);
     } else if (currentChatType.value === 'group') {
@@ -1723,35 +1777,57 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
         const senderId = String(item.sendUserId || item.sender?.userId || '');
         // 优先使用后端返回的 msgId，如果没有则尝试使用 id
         const msgId = item.msgId || item.id;
-        
+
         // 适配群聊/私聊字段差异: 优先使用 msgContent (新群聊字段)
         const msgContent = item.msgContent || item.msg || item.content || item.groupMsg?.msg || '';
         const msgType = item.msgType || '1'; // 默认 text (1)
 
+        // isHuman 字段：true=用户发的，false=AI发的（LLM聊天用isHuman判断）
+        // 没有isHuman字段时（如普通WebSocket聊天），用sendUserId判断
+        const isMine = item.isHuman !== undefined && item.isHuman !== null
+          ? item.isHuman === true
+          : senderId === myId;
+
         // 尝试从好友列表匹配昵称（针对私聊历史记录，后端可能只返回ID）
         let matchedNickname = '';
         let matchedAvatar = '';
-        if (currentChatType.value !== 'group' && senderId !== myId) {
+        if (currentChatType.value !== 'group' && !isMine) {
           const friend = friendList.value.find(f => String(f.userId || f.id) === senderId);
           if (friend) {
             matchedNickname = friend.nickname || friend.username;
             matchedAvatar = friend.faceImage || friend.face_image;
           }
-        } else if (senderId === myId) {
+        } else if (isMine) {
           // 如果是自己，直接从 userInfo 获取最新昵称和头像
           matchedNickname = userInfo.nickname || userInfo.username;
           matchedAvatar = userInfo.faceImage || userInfo.face_image;
         }
 
+        // 解析 LLM 消息的 msgContent（可能是 blocks JSON 数组）
+        let blocks = null;
+        let content = msgContent;
+        if (msgContent) {
+          try {
+            const parsed = typeof msgContent === 'string' ? JSON.parse(msgContent) : msgContent;
+            if (Array.isArray(parsed)) {
+              blocks = parsed;
+              content = null;
+            }
+          } catch (e) {
+            // 解析失败，保持原有 content 格式
+          }
+        }
+
         return {
-          id: msgId, 
-          content: msgContent,
+          id: msgId,
+          content: content,
+          blocks: blocks,
           createTime: item.createTime,
-          isMine: senderId === myId,
+          isMine: isMine,
           // 兼容数字和字符串类型的 msgType (1=text, 2=image, 3=video)
-          type: String(msgType) === '2' ? 'image' : (String(msgType) === '3' ? 'video' : 'text'), 
+          type: String(msgType) === '2' ? 'image' : (String(msgType) === '3' ? 'video' : 'text'),
           // 状态为 false 时表示已删除，不显示
-          isVisible: item.status !== false && item.status !== 'false', 
+          isVisible: item.status !== false && item.status !== 'false',
           senderId: senderId,
           // 优先使用消息自带的昵称，其次使用好友列表匹配的昵称，最后 fallback 到 ID
           senderName: item.nickname || item.username || item.sender?.nickname || item.sender?.username || matchedNickname || senderId,
@@ -1761,7 +1837,7 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
         };
       })
         .filter(msg => msg.isVisible) // 过滤掉不可见（已删除）的消息
-        .reverse(); // 反转数组，使该批次中较旧的消息排在前面
+        .reverse(); // DESC 返回 newest 在前，反转成 oldest 在顶
 
       if (isFirstLoad) {
         messageList.value = formattedMsgs;
@@ -1797,7 +1873,9 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
 
         if (!isNaN(timestamp)) {
           lastTimestamp.value = timestamp;
+          lastMsgId.value = oldestMsg.id;
           console.log('更新 lastTimestamp 为:', lastTimestamp.value);
+          console.log('更新 lastMsgId 为:', lastMsgId.value);
         } else {
           console.warn('无法解析的时间戳格式:', timeValue);
         }
@@ -2847,6 +2925,22 @@ const handleLogout = () => {
   margin-left: auto; /* Push mine message to right */
 }
 
+/* 消息入场动画 */
+@keyframes message-rise-up {
+  0% {
+    opacity: 0;
+    transform: translateY(25px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.message-item-container {
+  animation: message-rise-up 0.35s ease-out forwards;
+}
+
 .msg-avatar {
   flex-shrink: 0;
   border: 1px solid rgba(0, 0, 0, 0.05);
@@ -3235,6 +3329,61 @@ const handleLogout = () => {
 
 .edit-avatar-btn {
   margin-top: 15px;
+}
+
+.edit-avatar-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.edit-llm-avatar-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0 30px;
+}
+
+.edit-llm-avatar-wrapper {
+  position: relative;
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.edit-llm-avatar-wrapper .el-avatar {
+  display: block;
+}
+
+.edit-llm-avatar-mask {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s;
+  font-size: 13px;
+}
+
+.edit-llm-avatar-wrapper:hover .edit-llm-avatar-mask {
+  opacity: 1;
+}
+
+.edit-llm-avatar-mask .el-icon {
+  margin-bottom: 4px;
+}
+
+.edit-llm-nickname {
+  margin-top: 16px;
+  width: 200px;
+  text-align: center;
 }
 
 .info-list {

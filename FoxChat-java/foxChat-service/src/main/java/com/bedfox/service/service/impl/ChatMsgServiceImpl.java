@@ -12,6 +12,7 @@ import com.bedfox.pojo.to.UnreadMsgTo;
 import com.bedfox.common.util.LoginUserHolder;
 import com.bedfox.common.util.TimeUtil;
 import com.bedfox.pojo.vo.HistoryMsgVo;
+import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -32,10 +33,10 @@ import java.util.stream.Collectors;
 public class ChatMsgServiceImpl extends ServiceImpl<ChatMsgMapper, ChatMsg>
     implements ChatMsgService{
 
-    @Autowired
+    @Resource
     ChatMsgMapper chatMsgMapper;
 
-    @Autowired
+    @Resource
     MsgStatusService msgStatusService;
 
     /**

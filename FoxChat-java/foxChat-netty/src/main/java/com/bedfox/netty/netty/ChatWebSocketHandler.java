@@ -78,25 +78,30 @@ public class ChatWebSocketHandler extends SimpleChannelInboundHandler<ChatProtoc
     }
 
     private void boardLogOut(Channel channel) {
-        StringRedisTemplate redisTemplate = (StringRedisTemplate) SpringUtil.getBean(StringRedisTemplate.class);
-        String userKey = FriendConstant.USER_FRIEND_PRE + channel.attr(USER_ID_KEY).get();
+        try {
+            StringRedisTemplate redisTemplate = (StringRedisTemplate) SpringUtil.getBean(StringRedisTemplate.class);
+            String userKey = FriendConstant.USER_FRIEND_PRE + channel.attr(USER_ID_KEY).get();
 
-        // 检索到所有好友的Id
-        Set<String> friendSet = redisTemplate.opsForSet().members(userKey);
+            // 检索到所有好友的Id
+            Set<String> friendSet = redisTemplate.opsForSet().members(userKey);
 
-        MsgDto msgDto = new MsgDto();
-        ChatMsg chatMsg = new ChatMsg();
+            MsgDto msgDto = new MsgDto();
+            ChatMsg chatMsg = new ChatMsg();
 
-        msgDto.setType(MsgTypeConstant.USER_LOGOUT.getCode());
-        chatMsg.setSendUserId(channel.attr(USER_ID_KEY).get());
+            msgDto.setType(MsgTypeConstant.USER_LOGOUT.getCode());
+            chatMsg.setSendUserId(channel.attr(USER_ID_KEY).get());
 
-        if (friendSet != null && !friendSet.isEmpty()) {
-            for (String friendId : friendSet) {
-                chatMsg.setAcceptUserId(friendId);
-                msgDto.setChatMsg(chatMsg);
+            if (friendSet != null && !friendSet.isEmpty()) {
+                for (String friendId : friendSet) {
+                    chatMsg.setAcceptUserId(friendId);
+                    msgDto.setChatMsg(chatMsg);
 
-                redisTemplate.convertAndSend(RedisConstant.CHANNEL, ProtocolUtil.toProtocolBase64(msgDto));
+                    redisTemplate.convertAndSend(RedisConstant.CHANNEL, ProtocolUtil.toProtocolBase64(msgDto));
+                }
             }
+        } catch (IllegalStateException e) {
+            // Redis连接工厂已停止（应用关闭时），忽略此异常
+            log.warn("Redis连接已关闭，跳过广播下线通知: {}", e.getMessage());
         }
     }
 
@@ -121,8 +126,13 @@ public class ChatWebSocketHandler extends SimpleChannelInboundHandler<ChatProtoc
             UserChannelRelation.remove(userId, ctx.channel());
 
             // 清除 Redis 中的在线状态
-            StringRedisTemplate redisTemplate = (StringRedisTemplate) SpringUtil.getBean(StringRedisTemplate.class);
-            redisTemplate.delete(AuthConstant.PRE_ONLINE + userId);
+            try {
+                StringRedisTemplate redisTemplate = (StringRedisTemplate) SpringUtil.getBean(StringRedisTemplate.class);
+                redisTemplate.delete(AuthConstant.PRE_ONLINE + userId);
+            } catch (IllegalStateException e) {
+                // Redis连接工厂已停止（应用关闭时），忽略此异常
+                log.warn("Redis连接已关闭，跳过清除在线状态: {}", e.getMessage());
+            }
         }
     }
 }

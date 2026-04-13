@@ -43,10 +43,21 @@ public class LLMChatController {
     @PostMapping("/history")
     public R<List<LlmMsgHistoryVo>> getMsgHistory(@RequestBody LlmMsgHistoryReqDto reqDto) {
         List<LlmMsgHistoryVo> list = llmUserService.getMsgHistory(
-            reqDto.getLlmId(), 
-            reqDto.getLastTime()
+            reqDto.getLlmId(),
+            reqDto.getLastTime(),
+            reqDto.getLastId()
         );
 
         return R.ok(list);
+    }
+
+    @PostMapping("/update")
+    public R<Void> updateLlmFriend(@RequestBody Map<String, Object> requestMap) {
+        String llmId = (String) requestMap.get("llmId");
+        String nickname = (String) requestMap.get("nickname");
+        String faceImage = (String) requestMap.get("faceImage");
+
+        llmUserService.updateFriend(llmId, nickname, faceImage);
+        return R.ok();
     }
 }

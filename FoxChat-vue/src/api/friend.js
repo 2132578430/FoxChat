@@ -26,3 +26,8 @@ export function deleteFriend(friendId, role) {
     params: { friendId, role }
   });
 }
+
+// 更新模型好友（昵称+头像）
+export function updateLlmFriend(data) {
+  return request.post('/llm/update', data);
+}
