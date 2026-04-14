@@ -17,10 +17,10 @@ FoxChat-vue/dist_electron/
 FoxChatRAG-python/store/
 
 # AI 工具
-.troe/
-.trae/
-.opencode/
-.claude/
+.troe/*
+.trae/*
+.opencode/*
+.claude/*
 
 # 私密配置文件
 .env
