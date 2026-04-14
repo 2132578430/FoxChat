@@ -146,7 +146,7 @@
 
     <!-- Create Group Dialog -->
     <el-dialog v-model="showCreateGroupDialog" title="新建狐狸窝" width="400px" center destroy-on-close>
-      <el-form :model="createGroupForm" ref="createGroupFormRef" label-width="80px">
+      <el-form :model="createGroupForm" ref="createGroupFormRef" label-width="100px">
         <el-form-item label="狐狸窝名" prop="groupName" :rules="[{ required: true, message: '请输入狐狸窝名字', trigger: 'blur' }]">
           <el-input v-model="createGroupForm.groupName" placeholder="给狐狸窝起个名字吧"></el-input>
         </el-form-item>
