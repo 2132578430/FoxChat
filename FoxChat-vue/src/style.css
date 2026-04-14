@@ -1,5 +1,9 @@
+/* 引入内置字体 */
+@import 'harmonyos-sans/index.css';
+@import 'jetbrains-mono/fonts.css';
+
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'JetBrains Mono', 'HarmonyOS Sans', 'Microsoft YaHei', sans-serif;
   line-height: 1.5;
   font-weight: 400;
 

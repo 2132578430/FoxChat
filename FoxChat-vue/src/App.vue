@@ -10,6 +10,6 @@ import { RouterView } from 'vue-router'
 body {
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: 'JetBrains Mono', 'HarmonyOS Sans', 'Microsoft YaHei', sans-serif;
 }
 </style>

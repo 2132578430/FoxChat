@@ -69,132 +69,34 @@
           </transition>
         </div>
       </div>
-      <div class="chat-messages" ref="messageContainer" @scroll="handleScroll">
-        <!-- RAG 界面 -->
-        <div v-if="showRag" class="rag-container">
-          <!-- 文件列表视图 -->
-          <div v-if="ragFiles && ragFiles.length > 0" class="rag-files-list">
-            <div class="rag-list-header">
-              <div class="header-left">
-                <h3><el-icon><Files /></el-icon> {{ hasRagSearchResults ? '搜索结果' : '已上传知识库文件' }}</h3>
-                <el-tag type="primary" round size="small" effect="plain">{{ ragFiles.length }} 个文件</el-tag>
-              </div>
-              <el-button v-if="hasRagSearchResults" type="info" size="small" plain round @click="resetRagResults">
-                返回列表
-              </el-button>
-            </div>
-            <div class="rag-files-grid">
-              <div v-for="(file, index) in ragFiles" 
-                   :key="file.id || index" 
-                   class="rag-file-card"
-                   :class="{ 'clickable': !!file.filePath }"
-                   @click="handleFileClick(file)">
-                <div class="file-icon-wrapper">
-                  <el-icon><Document /></el-icon>
-                </div>
-                <div class="file-info">
-                  <span class="file-name" :title="file.fileName">{{ file.fileName }}</span>
-                  <div class="file-meta">
-                    <span class="file-time">{{ formatDateOnly(file.createTime) }}</span>
-                    <div class="file-tags">
-                      <el-tag v-if="file.score !== undefined && file.score !== null" :type="getScoreTagType(file.score)" size="small" effect="plain" class="score-tag">
-                        {{ getScoreLabel(file.score) }} {{ file.score.toFixed(2) }}
-                      </el-tag>
-                      <el-tag v-if="file.status !== undefined" :type="getFileStatusType(file.status)" size="small" effect="dark" class="status-tag">
-                        {{ getFileStatusLabel(file.status) }}
-                      </el-tag>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <!-- 默认/空状态视图 -->
-          <div v-else class="rag-welcome">
-            <div class="rag-card">
-              <div class="rag-logo-wrapper">
-                <el-icon class="rag-logo"><Reading /></el-icon>
-              </div>
-              <h2>狐狸RAG 知识库</h2>
-              <p>上传您的文档，让我为您提供智能知识服务吧~</p>
-              <div class="rag-tips">
-                <span>支持 PDF, TXT 等格式</span>
-                <span>单文件最大 100MB</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-        <div v-else v-for="(msg, index) in messageList" :key="msg.id || index" class="message-wrapper">
-          <!-- 撤回消息的显示 -->
-          <div v-if="msg.isWithdrawn" class="message-system">
-            <span class="system-text">"{{ msg.isMine ? '你' : (currentFriend.nickname || currentFriend.username) }}" 撤回了一条消息</span>
-          </div>
-          <!-- 正常消息 -->
-          <div v-else class="message-item-container" :class="{ 'selection-mode': isSelectionMode }">
-            <el-checkbox v-if="isSelectionMode && msg.isMine" v-model="msg.selected" @change="handleSelectionChange(msg)"></el-checkbox>
-            <div class="message-item" :class="{ 'mine': msg.isMine }">
-              <el-avatar :size="38" :src="resolveAvatarUrl(msg.isMine ? (userInfo.faceImage || userInfo.face_image) : (msg.senderAvatar || currentFriend.faceImage || currentFriend.face_image)) || defaultUserAvatar" class="msg-avatar"></el-avatar>
+      <!-- Message List -->
+      <MessageList
+        ref="messageListRef"
+        :messages="messageList"
+        :current-friend="currentFriend"
+        :current-group="currentGroup"
+        :current-chat-type="currentChatType"
+        :user-info="userInfo"
+        :is-selection-mode="isSelectionMode"
+        :selected-message-ids="selectedMessageIds"
+        :show-rag="showRag"
+        :rag-files="ragFiles"
+        :has-rag-search-results="hasRagSearchResults"
+        @load-more="loadMoreHistory"
+        @scroll-bottom="scrollToBottom"
+        @open-upload="showUploadDialog = true"
+        @reset-rag="resetRagResults"
+        @file-click="handleFileClick"
+      />
 
-              <div class="msg-bubble-wrapper">
-                <!-- 外部顶部：时间 -->
-                <div class="bubble-external-time">{{ formatTime(msg.createTime) }}</div>
-
-                <!-- 普通文本消息 -->
-                <div v-if="!msg.blocks" class="msg-bubble">
-                  <div class="bubble-content">{{ msg.content || msg.msg }}</div>
-                </div>
-
-                <!-- 结构化消息块（AI回复） -->
-                <template v-else v-for="(block, blockIndex) in msg.blocks" :key="blockIndex">
-                  <!-- 动作标签 -->
-                  <div v-if="block.type === 'action' || block.type === 'action_text'" class="action-tag">
-                    ○ {{ block.action }}
-                  </div>
-                  <!-- 文字内容 -->
-                  <div v-if="(block.type === 'text' || block.type === 'action_text') && block.text" class="msg-bubble">
-                    <div class="bubble-content">{{ block.text }}</div>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="chat-input">
-        <el-input
-          v-model="inputMessage"
-          type="textarea"
-          :rows="4"
-          placeholder="请输入消息..."
-          resize="none"
-          @keydown.enter="handleInputEnter"
-        ></el-input>
-        <div class="input-actions">
-          <el-button 
-            v-if="showRag" 
-            type="primary" 
-            class="fox-btn upload-btn" 
-            :icon="Upload" 
-            @click="showUploadDialog = true"
-          >
-            上传
-          </el-button>
-          <el-button 
-            type="primary" 
-            class="fox-btn send-btn" 
-            @click="sendMessage"
-            :disabled="!inputMessage.trim() || (showRag && isSearchingRag)"
-          >
-            <template v-if="showRag && isSearchingRag">
-              <el-icon class="loading-icon"><Loading /></el-icon>
-            </template>
-            <template v-else>
-              发送
-            </template>
-          </el-button>
-        </div>
-      </div>
+      <!-- Chat Input -->
+      <ChatInput
+        v-model="inputMessage"
+        :show-rag="showRag"
+        :is-searching-rag="isSearchingRag"
+        @send="sendMessage"
+        @open-upload="showUploadDialog = true"
+      />
     </div>
 
     <!-- Profile Detail -->
@@ -229,84 +131,18 @@
     </transition>
 
     <!-- Group List -->
-    <transition name="slide-fade">
-      <div class="friend-list" v-show="showGroupList">
-        <div class="search-box">
-          <el-input 
-            placeholder="搜索狐狸窝" 
-            prefix-icon="Search" 
-            v-model="searchText"
-            @input="handleSearch"
-          ></el-input>
-        </div>
-        <div class="friend-group">
-          <div class="group-header" style="justify-content: flex-end;">
-            <el-tooltip content="新建狐狸窝" placement="top">
-              <el-button circle size="small" :icon="Plus" @click="showCreateGroupDialog = true"></el-button>
-            </el-tooltip>
-          </div>
-          
-          <div class="no-result" v-if="groupList.length === 0 && !isGroupLoading && !isSearching">
-            这里空空如也，快去创建一个吧～
-          </div>
-
-          <!-- 搜索模式下的群组展示 -->
-          <div v-if="isSearching">
-            <div v-if="searchResultList.length === 0" class="no-result">
-              未找到相关群组
-            </div>
-            <div 
-              v-for="group in searchResultList" 
-              :key="group.id" 
-              class="friend-item" 
-              @click="handleGroupClick(group)"
-            >
-              <div class="friend-avatar-wrapper">
-                <el-avatar :size="40" :src="group.faceImage || defaultGroupAvatar"></el-avatar>
-              </div>
-              <div class="friend-info">
-                <div class="friend-name">{{ group.groupName }}</div>
-                <div class="friend-status" v-if="!group.isJoined">未加入</div>
-              </div>
-              <!-- 加入群组按钮 -->
-              <el-button 
-              v-if="!group.isJoined" 
-              type="primary" 
-              size="small" 
-              circle 
-              :icon="Plus"
-              :loading="group.isJoining"
-              @click.stop="handleJoinGroup(group)"
-            ></el-button>
-            </div>
-          </div>
-          
-          <!-- 正常列表模式 -->
-          <div v-else>
-            <div 
-              v-for="group in groupList" 
-              :key="group.id" 
-              class="friend-item" 
-              :class="{ 'active': currentGroup.id === group.id }"
-              @click="handleGroupClick(group)"
-            >
-              <div class="friend-avatar-wrapper">
-                <el-avatar :size="40" :src="resolveAvatarUrl(group.faceImage || group.avatar) || defaultGroupAvatar"></el-avatar>
-                <div v-if="group.unreadCount > 0" class="unread-badge">{{ group.unreadCount > 99 ? '99+' : group.unreadCount }}</div>
-              </div>
-              <div class="friend-info">
-                <div class="friend-name">
-                  {{ group.groupName }}
-                </div>
-              </div>
-              <el-tooltip content="我是群主" placement="top" v-if="String(group.ownerUserId) === String(userInfo.userId)">
-                <div class="owner-badge">🦊</div>
-              </el-tooltip>
-            </div>
-          </div>
-        </div>
-      </div>
-    </transition>
+    <GroupList
+      ref="groupListRef"
+      v-model="showGroupList"
+      :groups="groupList"
+      :current-group-id="currentGroup.id"
+      :user-info="userInfo"
+      :is-group-loading="isGroupLoading"
+      @select-group="handleGroupClick"
+      @join-group="handleJoinGroup"
+      @create-group="showCreateGroupDialog = true"
+      @search="handleGroupSearch"
+    />
 
     <!-- Create Group Dialog -->
     <el-dialog v-model="showCreateGroupDialog" title="新建狐狸窝" width="400px" center destroy-on-close>
@@ -401,103 +237,31 @@
     </el-dialog>
 
     <!-- Friend List -->
-    <transition name="slide-fade">
-      <div class="friend-list" v-show="showFriendList">
-        <div class="search-box">
-          <el-input 
-            placeholder="搜索好友" 
-            prefix-icon="Search" 
-            v-model="searchText"
-            @input="handleSearch"
-          ></el-input>
-        </div>
-        <div class="friend-group">
-          <div class="group-header" style="justify-content: flex-end;">
-            <el-tooltip content="添加陪伴者" placement="top">
-              <el-button circle size="small" :icon="Plus" @click="showAddLlmFriendDialog = true"></el-button>
-            </el-tooltip>
-          </div>
-          
-          <div v-if="isSearching && searchResultList.length === 0" class="no-result">
-            未找到相关用户
-          </div>
-
-          <div 
-            v-for="friend in (isSearching ? searchResultList : [...friendRequestList, ...friendList])" 
-            :key="friend.userId || friend.id" 
-            class="friend-item" 
-            :class="{ 
-              'active': (currentFriend.userId || currentFriend.id) === (friend.userId || friend.id),
-              'request-item': friend.isRequest 
-            }"
-            @click="selectFriend(friend)"
-            @contextmenu.prevent="showFriendContextMenu($event, friend)"
-          >
-            <div class="friend-avatar-wrapper">
-              <el-avatar :size="40" :src="resolveAvatarUrl(friend.faceImage || friend.face_image) || defaultUserAvatar"></el-avatar>
-              <div v-if="friend.unreadCount > 0" class="unread-badge">{{ friend.unreadCount > 99 ? '99+' : friend.unreadCount }}</div>
-            </div>
-            <div class="friend-info">
-              <div class="friend-name">
-                {{ friend.nickname || friend.username }}
-                <span v-if="friend.username && friend.nickname && friend.username !== friend.nickname" class="friend-username">
-                  ({{ friend.username }})
-                </span>
-              </div>
-              <div class="friend-status" :class="{ 'online': isFriendOnline(friend) }" v-if="friend.role !== 1">
-                {{ friend.isRequest ? '新朋友' : ((isSearching && !friend.isFriend) ? '陌生人' : (isFriendOnline(friend) ? '在线' : '离线')) }}
-              </div>
-            </div>
-            
-            <!-- AI Icon -->
-            <div v-if="friend.role === 1" class="ai-tag-icon">
-              🦊
-            </div>
-            
-            <!-- Add Friend Button (Search Mode) -->
-            <el-button 
-              v-if="isSearching && (friend.userId || friend.id) !== userInfo.userId && !friend.isFriend" 
-              type="primary" 
-              size="small" 
-              circle 
-              :icon="Plus"
-              @click.stop="handleAddFriend(friend)"
-            ></el-button>
-
-            <!-- Accept Friend Button (Request List) -->
-            <el-button 
-              v-if="friend.isRequest" 
-              type="success" 
-              size="small" 
-              @click.stop="handleAcceptFriend(friend)"
-            >接受</el-button>
-          </div>
-        </div>
-      </div>
-    </transition>
+    <FriendList
+      ref="friendListRef"
+      v-model="showFriendList"
+      v-model:search-text="searchText"
+      :friends="friendList"
+      :friend-requests="friendRequestList"
+      :user-info="userInfo"
+      :current-friend-id="currentFriend.userId || currentFriend.id"
+      @select-friend="selectFriend"
+      @accept-request="handleAcceptFriend"
+      @add-friend="handleAddFriend"
+      @add-llm-friend="showAddLlmFriendDialog = true"
+      @delete-friend="handleDeleteFriend"
+      @edit-llm-friend="handleEditLlmFriend"
+      @search="handleFriendSearch"
+    />
     <!-- Avatar Cropper Dialog -->
     <AvatarCropper v-model:visible="showAvatarCropper" @success="handleAvatarSuccess" />
-
-    <!-- Friend Context Menu -->
-    <div v-if="friendContextMenu.show"
-         class="friend-context-menu"
-         :style="{ top: friendContextMenu.y + 'px', left: friendContextMenu.x + 'px' }">
-      <div v-if="friendContextMenu.friend?.role === 1" class="context-menu-item" @click="handleEditLlmFriend">
-        <el-icon><Edit /></el-icon>
-        <span>修改模型</span>
-      </div>
-      <div class="context-menu-item delete" @click="handleDeleteFriend">
-        <el-icon><Delete /></el-icon>
-        <span>删除好友</span>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted, nextTick, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { ChatDotRound, User, SwitchButton, Search, Plus, Select, ChatSquare, UserFilled, Reading, Upload, UploadFilled, Files, Document, Loading, Delete, Edit } from '@element-plus/icons-vue';
+import { ChatDotRound, User, SwitchButton, Select, ChatSquare, Reading } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 import { encodeProtocol, decodeProtocol } from '@/utils/protocol'; // 引入协议编解码器
 import snowflake from '@/utils/snowflake'; // 引入雪花ID生成器
@@ -508,9 +272,12 @@ import * as groupApi from '@/api/group';
 import request from '@/utils/request';
 
 import AvatarCropper from '@/components/AvatarCropper.vue';
+import ChatInput from '@/components/Chat/ChatInput.vue';
+import MessageList from '@/components/Chat/MessageList.vue';
+import FriendList from '@/components/Chat/FriendList.vue';
+import GroupList from '@/components/Chat/GroupList.vue';
 
 const defaultUserAvatar = 'https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png';
-const defaultGroupAvatar = 'https://cube.elemecdn.com/9/c2/f0ee8a3c7c9638a54940382568c9dpng.png'; // 使用不同的默认图，或者之后改为 icon
 
 const router = useRouter();
 const userInfo = reactive(JSON.parse(localStorage.getItem('userInfo') || '{}'));
@@ -522,7 +289,9 @@ const currentGroup = ref({});
 const currentChatType = ref('private'); // 'private' or 'group'
 const messageList = ref([]);
 const inputMessage = ref('');
-const messageContainer = ref(null);
+const messageListRef = ref(null);
+const friendListRef = ref(null);
+const groupListRef = ref(null);
 const isLoadingHistory = ref(false);
 const hasMoreHistory = ref(true);
 const lastTimestamp = ref(null);
@@ -536,7 +305,6 @@ const profileInfo = ref({
   nickname: '',
   email: ''
 });
-const searchGroupText = ref('');
 const showCreateGroupDialog = ref(false);
 const showAddLlmFriendDialog = ref(false);
 const showEditLlmFriendDialog = ref(false);
@@ -549,40 +317,14 @@ const showRag = ref(false);
 const ragFiles = ref([]); // RAG 文件列表
 const showUploadDialog = ref(false);
 
-// 好友右键菜单状态
-const friendContextMenu = reactive({
-  show: false,
-  x: 0,
-  y: 0,
-  friend: null
-});
-
-const showFriendContextMenu = (event, friend) => {
-  // 仅对非申请列表的好友显示右键菜单
-  if (friend.isRequest) return;
-  
-  friendContextMenu.show = true;
-  friendContextMenu.x = event.clientX;
-  friendContextMenu.y = event.clientY;
-  friendContextMenu.friend = friend;
-};
-
-const closeFriendContextMenu = () => {
-  friendContextMenu.show = false;
-};
-
-const handleDeleteFriend = async () => {
-  if (!friendContextMenu.friend) return;
-  const f = friendContextMenu.friend;
-  const friendId = f.userId || f.id || f.llmId;
-  const role = f.role || 0;
-  
+const handleDeleteFriend = async (friend) => {
+  if (!friend) return;
+  const friendId = friend.userId || friend.id || friend.llmId;
+  const role = friend.role || 0;
   try {
     await friendApi.deleteFriend(friendId, role);
     ElMessage.success('好友已删除');
-    // 刷新好友列表
     getFriendList();
-    // 如果当前正在和这个好友聊天，关闭聊天窗口
     const currentId = currentFriend.value?.userId || currentFriend.value?.id;
     if (currentId && String(currentId) === String(friendId)) {
       currentFriend.value = {};
@@ -591,20 +333,17 @@ const handleDeleteFriend = async () => {
   } catch (error) {
     console.error('删除好友失败:', error);
     ElMessage.error('删除好友失败');
-  } finally {
-    closeFriendContextMenu();
   }
 };
 
-const handleEditLlmFriend = () => {
-  const f = friendContextMenu.friend;
+const handleEditLlmFriend = (friend) => {
+  const f = friend;
   if (!f) return;
   editLlmFriendForm.llmId = f.userId || f.id || f.llmId;
   editLlmFriendForm.nickname = f.nickname || '';
   editLlmFriendForm.faceImage = f.faceImage || f.face_image || '';
   isAvatarCropperForLlm.value = true;
   showEditLlmFriendDialog.value = true;
-  closeFriendContextMenu();
 };
 
 const handleUpdateLlmFriend = async () => {
@@ -696,39 +435,6 @@ const searchRagFiles = async (content) => {
   }
 };
 
-// 获取文件状态文本
-const getFileStatusLabel = (status) => {
-  const statusMap = {
-    0: '已创建',
-    1: '存入数据库',
-    2: '读入RAG'
-  };
-  return statusMap[status] || '未知状态';
-};
-
-// 获取文件状态对应的标签类型
-const getFileStatusType = (status) => {
-  const typeMap = {
-    0: 'info',
-    1: 'warning',
-    2: 'success'
-  };
-  return typeMap[status] || 'info';
-};
-
-// 获取匹配度标签类型（适配余弦距离：分数越低越相似）
-const getScoreTagType = (score) => {
-  if (score <= 1.25) return 'success';
-  if (score <= 1.45) return 'warning';
-  return 'danger';
-};
-
-// 获取匹配度文字
-const getScoreLabel = (score) => {
-  if (score <= 1.25) return '强相关';
-  if (score <= 1.45) return '中等相关';
-  return '弱相关';
-};
 const isSelectionMode = ref(false);
 const selectedMessageIds = ref([]);
 
@@ -779,7 +485,7 @@ const submitBatchUpload = async () => {
   }
 
   try {
-    const res = await request.post('/rag/uploadVector', formData, {
+    await request.post('/rag/uploadVector', formData, {
       headers: {
         'Content-Type': 'multipart/form-data'
       }
@@ -815,8 +521,7 @@ watch(showAvatarCropper, (val) => {
 // Mock Friend Data (Will replace with API call)
 const friendList = ref([]);
 const friendRequestList = ref([]);
-const searchResultList = ref([]);
-const isSearching = ref(false);
+
 
 onMounted(() => {
   if (!userInfo.username) {
@@ -825,11 +530,8 @@ onMounted(() => {
   }
   getUserInfo(); // 进入主页立即获取用户信息
   getFriendList();
-  getFriendRequests(); // 启用获取好友申请列表
+  getFriendRequests();
   initWebSocket();
-  
-  // 监听全局点击事件以关闭右键菜单
-  window.addEventListener('click', closeFriendContextMenu);
 });
 
 const getUnreadCounts = async () => {
@@ -857,7 +559,6 @@ onUnmounted(() => {
     }
   }
   stopHeartbeat();
-  window.removeEventListener('click', closeFriendContextMenu);
 });
 
 const toggleProfile = () => {
@@ -883,14 +584,6 @@ const getUserInfo = async () => {
     localStorage.setItem('userInfo', JSON.stringify(userInfo));
   } catch (error) {
     console.error('获取个人信息失败:', error);
-  }
-};
-
-const handleSelectionChange = (msg) => {
-  if (msg.selected) {
-    selectedMessageIds.value.push(msg.id);
-  } else {
-    selectedMessageIds.value = selectedMessageIds.value.filter(id => id !== msg.id);
   }
 };
 
@@ -1431,83 +1124,69 @@ const getFriendRequests = async () => {
   }
 };
 
-const handleSearch = async () => {
-  if (!searchText.value.trim()) {
-    isSearching.value = false;
-    searchResultList.value = [];
+const handleGroupSearch = async (text) => {
+  if (!groupListRef.value) return;
+  if (!text.trim()) {
+    groupListRef.value.isSearching = false;
+    groupListRef.value.searchResultList = [];
     return;
   }
-
-  isSearching.value = true;
-  searchResultList.value = [];
-
+  groupListRef.value.isSearching = true;
+  groupListRef.value.searchResultList = [];
   try {
-    if (showGroupList.value) {
-      // --- Group Search Logic ---
-      // 1. Search in local group list first
-      const localResult = groupList.value
-        .filter(group => 
-          (group.groupName && group.groupName.includes(searchText.value))
-        )
-        .map(group => ({ ...group, isJoined: true, isGroup: true }));
-
-      if (localResult.length > 0) {
-        searchResultList.value = localResult;
-      } else {
-        // 2. If not found locally, call API to search groups
-        const data = await groupApi.searchGroup(searchText.value);
-        let results = [];
-        if (Array.isArray(data)) {
-          results = data;
-        } else if (data) {
-          results = [data];
-        } else if (data && data.list) {
-          results = data.list;
-        }
-
-        searchResultList.value = results.map(g => ({
-          ...g,
-          id: g.id || g.groupId,
-          groupName: g.groupName || g.name,
-          faceImage: g.faceImage || g.avatar,
-          isJoined: g.isJoined !== undefined ? g.isJoined : false, // 搜索结果默认可能未加入
-          isGroup: true
-        }));
-      }
+    const localResult = groupList.value
+      .filter(g => g.groupName && g.groupName.includes(text))
+      .map(g => ({ ...g, isJoined: true, isGroup: true }));
+    if (localResult.length > 0) {
+      groupListRef.value.searchResultList = localResult;
     } else {
-      // --- Friend Search Logic ---
-      // 1. Search in local friend list first
-      const localResult = friendList.value
-        .filter(friend => 
-          (friend.nickname && friend.nickname.includes(searchText.value)) || 
-          (friend.username && friend.username.includes(searchText.value))
-        )
-        .map(friend => ({ ...friend, isFriend: true, isGroup: false }));
-
-      if (localResult.length > 0) {
-        searchResultList.value = localResult;
-      } else {
-        // 2. If not found locally, call API to search friends/strangers
-        const data = await friendApi.searchFriend(searchText.value);
-        let results = [];
-        if (Array.isArray(data)) {
-          results = data;
-        } else if (data && data.list) {
-          results = data.list;
-        } else if (data) {
-          results = [data];
-        }
-        
-        searchResultList.value = results.map(user => {
-          const targetId = String(user.userId || user.id);
-          const isAlreadyFriend = friendList.value.some(f => String(f.userId || f.id) === targetId);
-          return { ...user, isFriend: isAlreadyFriend, isGroup: false };
-        });
-      }
+      const data = await groupApi.searchGroup(text);
+      let results = Array.isArray(data) ? data : (data && data.list ? data.list : (data ? [data] : []));
+      groupListRef.value.searchResultList = results.map(g => ({
+        ...g,
+        id: g.id || g.groupId,
+        groupName: g.groupName || g.name,
+        faceImage: g.faceImage || g.avatar,
+        isJoined: g.isJoined !== undefined ? g.isJoined : false,
+        isGroup: true
+      }));
     }
   } catch (error) {
-    console.error('搜索失败:', error);
-    searchResultList.value = [];
+    console.error('搜索群组失败:', error);
+    groupListRef.value.searchResultList = [];
+  }
+};
+
+const handleFriendSearch = async (text) => {
+  if (!friendListRef.value) return;
+  if (!text.trim()) {
+    friendListRef.value.isSearching = false;
+    friendListRef.value.searchResultList = [];
+    return;
+  }
+  friendListRef.value.isSearching = true;
+  friendListRef.value.searchResultList = [];
+  try {
+    const localResult = friendList.value
+      .filter(f =>
+        (f.nickname && f.nickname.includes(text)) ||
+        (f.username && f.username.includes(text))
+      )
+      .map(f => ({ ...f, isFriend: true, isGroup: false }));
+    if (localResult.length > 0) {
+      friendListRef.value.searchResultList = localResult;
+    } else {
+      const data = await friendApi.searchFriend(text);
+      let results = Array.isArray(data) ? data : (data && data.list ? data.list : (data ? [data] : []));
+      friendListRef.value.searchResultList = results.map(user => {
+        const targetId = String(user.userId || user.id);
+        const isAlreadyFriend = friendList.value.some(f => String(f.userId || f.id) === targetId);
+        return { ...user, isFriend: isAlreadyFriend, isGroup: false };
+      });
+    }
+  } catch (error) {
+    console.error('搜索好友失败:', error);
+    friendListRef.value.searchResultList = [];
   }
 };
 
@@ -1889,83 +1568,6 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
   }
 };
 
-const handleScroll = (e) => {
-  const container = e.target;
-  // 当滚动到顶部（scrollTop 为 0）且还有更多数据时，加载更多
-  if (container.scrollTop === 0 && hasMoreHistory.value && !isLoadingHistory.value) {
-    let targetId;
-    if (currentChatType.value === 'group') {
-      targetId = currentGroup.value?.id || currentGroup.value?.groupId;
-    } else {
-      targetId = currentFriend.value?.userId || currentFriend.value?.id;
-    }
-    
-    if (targetId) {
-      getChatHistory(targetId, false);
-    }
-  }
-};
-
-const formatTime = (timeValue) => {
-  if (!timeValue) return '';
-  try {
-    // 处理各种格式的时间戳：字符串数字、纯数字、ISO 字符串
-    let date;
-    if (!isNaN(timeValue) && typeof timeValue !== 'boolean') {
-      // 如果是纯数字或数字字符串（如 "1771069774000"）
-      date = new Date(Number(timeValue));
-    } else {
-      // 尝试直接解析（如 ISO 字符串 "2026-02-14T19:49:34"）
-      date = new Date(timeValue);
-    }
-
-    if (isNaN(date.getTime())) return String(timeValue);
-
-    const now = new Date();
-    const isToday = date.toDateString() === now.toDateString();
-    
-    if (isToday) {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-    } else {
-      return `${date.getMonth() + 1}-${date.getDate()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
-    }
-  } catch (e) {
-    return String(timeValue);
-  }
-};
-
-// 专门用于 RAG 列表的日期格式化（仅显示年月日）
-const formatDateOnly = (timeValue) => {
-  if (!timeValue) return '';
-  try {
-    let date;
-    if (!isNaN(timeValue) && typeof timeValue !== 'boolean') {
-      date = new Date(Number(timeValue));
-    } else {
-      date = new Date(timeValue);
-    }
-    if (isNaN(date.getTime())) return '';
-    
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  } catch (e) {
-    return '';
-  }
-};
-
-// 处理输入框回车键：Shift+Enter 换行，Enter 发送
-const handleInputEnter = (e) => {
-  if (e.shiftKey) {
-    // Shift+Enter：允许换行（textarea 默认行为）
-    return;
-  }
-  // Enter 发送
-  e.preventDefault();
-  sendMessage();
-};
-
 const sendMessage = async () => {
   console.log('[Send] sendMessage called');
   if (!inputMessage.value.trim()) {
@@ -2211,15 +1813,11 @@ const sendMessage = async () => {
   }
 };
 
-const isFriendOnline = (friend) => {
-  // 兼容布尔值 true, 字符串 "true", 数字 1
-  return friend.online === true || friend.online === 'true' || friend.online === 1 || friend.online === '1';
-};
-
 const scrollToBottom = () => {
   nextTick(() => {
-    if (messageContainer.value) {
-      messageContainer.value.scrollTop = messageContainer.value.scrollHeight;
+    // 调用子组件的 scrollToBottom 方法
+    if (messageListRef.value?.scrollToBottom) {
+      messageListRef.value.scrollToBottom();
     }
   });
 };
@@ -2347,7 +1945,7 @@ const handleJoinGroup = async (group) => {
     // 刷新群组列表
     getGroupList();
     // 更新搜索结果中的加入状态
-    const targetGroup = searchResultList.value.find(g => g.id === group.id);
+    const targetGroup = groupListRef.value?.searchResultList?.find(g => g.id === group.id);
     if (targetGroup) {
       targetGroup.isJoined = true;
     }
@@ -2851,374 +2449,7 @@ const handleLogout = () => {
   transform: scale(0.9);
 }
 
-.chat-messages {
-  flex: 1;
-  padding: 15px; /* 减少内边距 */
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px; /* 减少消息之间的间距 */
-}
-
-.message-wrapper {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-.message-item-container {
-  display: flex;
-  align-items: flex-start; /* 改为顶部对齐，避免气泡高度不一致时的对齐问题 */
-  gap: 8px; /* 减少头像和气泡的间距 */
-  width: 100%;
-}
-
-.message-item-container.selection-mode {
-  padding-left: 10px;
-}
-
-/* System Message (Withdraw) */
-.message-system {
-  display: flex;
-  justify-content: center;
-  margin: 10px 0;
-}
-
-.system-text {
-  font-size: 12px;
-  color: #999;
-  background-color: rgba(220, 220, 220, 0.3);
-  padding: 4px 12px;
-  border-radius: 12px;
-}
-
-.message-item {
-  display: flex;
-  gap: 8px; /* 减少头像和气泡间距 */
-  max-width: 70%; /* 限制最大宽度，让气泡更紧凑 */
-  align-self: flex-start;
-  /* flex: 1;  移除 flex: 1，避免占满剩余空间 */
-}
-
-.message-item.mine {
-  align-self: flex-end;
-  flex-direction: row-reverse;
-  justify-content: flex-start; /* Ensure content starts from right */
-}
-
-/* Fix for selection mode alignment */
-.message-item-container:has(.message-item.mine) {
-  flex-direction: row-reverse; /* Put checkbox on right for sent messages if needed, or keep left */
-}
-
-/* Actually, checkboxes are usually on the left for all messages in selection mode */
-.message-item-container {
-  flex-direction: row; /* Always row */
-}
-
-.message-item-container .el-checkbox {
-  margin-right: 10px;
-}
-
-/* When in selection mode, mine messages still need to align right but checkbox is on left */
-.message-item-container:has(.message-item.mine) .message-item {
-  margin-left: auto; /* Push mine message to right */
-}
-
-/* 消息入场动画 */
-@keyframes message-rise-up {
-  0% {
-    opacity: 0;
-    transform: translateY(25px) scale(0.95);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-.message-item-container {
-  animation: message-rise-up 0.35s ease-out forwards;
-}
-
-.msg-avatar {
-  flex-shrink: 0;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.msg-bubble-wrapper {
-  display: flex;
-  flex-direction: column;
-  max-width: 100%;
-}
-
-.message-item.mine .msg-bubble-wrapper {
-  align-items: flex-end;
-}
-
-.message-item:not(.mine) .msg-bubble-wrapper {
-  align-items: flex-start;
-}
-
-.bubble-external-time {
-  font-size: 11px;
-  color: #000;
-  margin-bottom: 4px;
-  padding: 0 4px;
-}
-
-/* 新的气泡样式 */
-.msg-bubble {
-  background-color: rgba(60, 60, 60, 0.9);
-  padding: 8px 14px; /* 缩紧内边距 */
-  border-radius: 18px; /* 稍微收紧圆角 */
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  position: relative;
-  min-width: 20px; /* 取消宽大的最小宽度 */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  /* backdrop-filter removed for performance */
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #fff;
-}
-
-.message-item.mine .msg-bubble {
-  background-color: rgba(100, 100, 100, 0.9);
-  border-top-right-radius: 4px;
-}
-
-.message-item:not(.mine) .msg-bubble {
-  border-top-left-radius: 4px;
-}
-
-.action-tag {
-  font-size: 12px;
-  color: #999;
-  font-style: italic;
-  margin-bottom: 4px;
-  padding: 0 4px;
-}
-
-.bubble-content {
-  font-size: 14px;
-  color: #ffffff;
-  line-height: 1.6;
-  word-break: break-all;
-  text-align: left;
-}
-
-.chat-input {
-  padding: 15px 25px;
-  background-color: var(--input-bg);
-  /* backdrop-filter removed for performance */
-  border-top: 1px solid var(--input-border);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.chat-input :deep(.el-textarea) {
-  flex: 1;
-}
-
-.chat-input :deep(.el-textarea__inner) {
-  background-color: var(--input-inner-bg);
-  border-radius: 20px;
-  border: 1px solid var(--input-border);
-  padding: 8px 18px;
-  resize: none;
-  box-shadow: none !important;
-  transition: all 0.3s;
-  height: 40px !important;
-  min-height: 40px !important;
-  line-height: 22px;
-  color: var(--text-primary);
-}
-
-.chat-input :deep(.el-textarea__inner:focus) {
-  background-color: rgba(255, 255, 255, 0.9);
-  border-color: var(--accent-color);
-}
-
-.input-actions {
-  display: flex;
-  align-items: center; /* 垂直居中对齐 */
-  gap: 12px;
-  flex-shrink: 0;
-  height: 44px; /* 与按钮高度保持一致，确保容器本身也是对齐的 */
-}
-
-/* Friend List */
-.friend-list {
-  width: 300px;
-  background-color: rgba(255, 255, 255, 0.4);
-  /* backdrop-filter removed for performance */
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid rgba(255, 255, 255, 0.3);
-  position: absolute;
-  top: 0;
-  right: 0;
-  height: 100%;
-  z-index: 9;
-  box-shadow: -4px 0 15px rgba(0,0,0,0.05);
-}
-
-.search-box {
-  padding: 20px;
-  background-color: transparent;
-}
-
-.search-box :deep(.el-input__wrapper) {
-  background-color: rgba(255, 255, 255, 0.5);
-  border-radius: 10px;
-  box-shadow: none !important;
-  border: 1px solid rgba(255, 255, 255, 0.5);
-}
-
-.friend-group {
-  flex: 1;
-  overflow-y: auto;
-}
-
-.group-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 20px;
-}
-
-.group-title {
-  color: rgba(0, 0, 0, 0.4);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.friend-avatar-wrapper {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.unread-badge {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  background-color: #ff4d4f;
-  color: white;
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 10px;
-  min-width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid #fff;
-  z-index: 1;
-}
-
-.friend-item {
-  display: flex;
-  align-items: center;
-  padding: 12px 15px;
-  cursor: pointer;
-  border-radius: 8px;
-  margin: 0 8px 4px;
-}
-
-.friend-item:hover {
-  background-color: var(--accent-hover);
-}
-
-.friend-item.active {
-  background-color: var(--accent-active);
-}
-
-.ai-tag-icon {
-  font-size: 18px;
-  margin-left: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.request-item {
-  background-color: rgba(240, 249, 235, 0.6); /* Light green background for requests */
-}
-
-.request-item:hover {
-  background-color: rgba(225, 243, 216, 0.8);
-}
-
-.friend-info {
-  margin-left: 10px;
-  flex: 1;
-}
-
-.friend-name {
-  font-size: 14px;
-  color: #000000;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-/* Friend Username (small text) */
-.friend-username {
-  font-size: 12px;
-  color: #999;
-  margin-left: 5px;
-  font-weight: normal;
-}
-
-/* 好友右键菜单样式 */
-.friend-context-menu {
-  position: fixed;
-  z-index: 10000;
-  background: #ffffff;
-  border-radius: 4px;
-  box-shadow: 0 2px 8px 0 rgba(0, 0, 0, 0.15);
-  padding: 0;
-  min-width: 90px;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-.friend-context-menu .context-menu-item {
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  cursor: pointer;
-  font-size: 13px;
-  color: #606266;
-  white-space: nowrap;
-  box-sizing: border-box;
-  width: 100%;
-}
-
-.friend-context-menu .context-menu-item .el-icon {
-  margin-right: 6px;
-  font-size: 14px;
-}
-
-.friend-context-menu .context-menu-item:hover {
-  background-color: #f5f5f5;
-}
-
-.friend-context-menu .context-menu-item.delete {
-  color: #ff4d4f;
-}
-
-.friend-context-menu .context-menu-item.delete:hover {
-  background-color: #fff1f0;
-  color: #ff4d4f;
-}
+/* Friend List - 已移至 FriendList.vue 组件 */
 
 /* Element Plus Button Override */
 :deep(.el-button--primary) {
@@ -3259,15 +2490,6 @@ const handleLogout = () => {
 .owner-badge {
   font-size: 16px;
   margin-left: 5px;
-}
-
-.friend-status {
-  font-size: 12px;
-  color: #999;
-}
-
-.friend-status.online {
-  color: #07c160;
 }
 
 /* Custom Scrollbar */
