@@ -26,5 +26,7 @@ public interface LlmUserService extends IService<LlmUser> {
 
     LlmChatMsgVo llmChat(String llmId, String msgContent);
 
+    LlmChatMsgVo llmSuperChat(String llmId, String msgContent);
+
     List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime, Long lastId);
 }

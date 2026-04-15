@@ -305,7 +305,7 @@ async def _compress_memory_bank_if_needed(user_id: str, llm_id: str) -> None:
         logger.warning(f"memory_bank 压缩 JSON 解析失败: {compressed}")
 
 async def _async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
-    if recent_msg_size < 30:
+    if recent_msg_size < 12:
         return
 
     # 当大于等于30条记录，取出消息

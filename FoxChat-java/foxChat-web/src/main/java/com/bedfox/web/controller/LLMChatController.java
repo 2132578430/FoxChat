@@ -34,6 +34,15 @@ public class LLMChatController {
         return R.ok(chatMsgVo);
     }
 
+    @PostMapping("/superChat")
+    public R<LlmChatMsgVo> llmSuperChat(@RequestBody Map<String, Object> requestMap) {
+        String llmId = (String) requestMap.get("llmId");
+        String msgContent = (String) requestMap.get("msgContent");
+
+        LlmChatMsgVo chatMsgVo = llmUserService.llmSuperChat(llmId, msgContent);
+        return R.ok(chatMsgVo);
+    }
+
     @PostMapping("/add")
     public R<String> addLlm(@RequestBody AddLlmFriendDto friendDto) {
         llmUserService.saveFriend(friendDto);

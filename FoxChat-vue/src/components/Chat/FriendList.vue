@@ -48,9 +48,17 @@
             </div>
           </div>
 
-          <!-- AI Icon -->
-          <div v-if="friend.role === 1" class="ai-tag-icon">
-            🦊
+          <!-- AI Icon & Director Mode Switch -->
+          <div v-if="friend.role === 1" class="ai-features">
+            <el-tooltip content="导演模式" placement="top">
+              <el-switch
+                v-model="friend.directorMode"
+                size="small"
+                @click.stop
+                @change="handleDirectorModeChange(friend)"
+              />
+            </el-tooltip>
+            <span class="ai-tag-icon">🦊</span>
           </div>
 
           <!-- Add Friend Button (Search Mode) -->
@@ -129,7 +137,8 @@ const emit = defineEmits([
   'search',
   'context-menu',
   'delete-friend',
-  'edit-llm-friend'
+  'edit-llm-friend',
+  'director-mode-change'
 ]);
 
 const defaultUserAvatar = 'https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png';
@@ -171,6 +180,10 @@ const handleSearchInput = (value) => {
 const handleSelectFriend = (friend) => {
   if (friend.isRequest) return;
   emit('select-friend', friend);
+};
+
+const handleDirectorModeChange = (friend) => {
+  emit('director-mode-change', friend);
 };
 
 const showFriendContextMenu = (event, friend) => {
@@ -296,10 +309,16 @@ defineExpose({
 
 .ai-tag-icon {
   font-size: 18px;
-  margin-left: 10px;
+  margin-left: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.ai-features {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .request-item {

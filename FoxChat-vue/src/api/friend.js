@@ -31,3 +31,8 @@ export function deleteFriend(friendId, role) {
 export function updateLlmFriend(data) {
   return request.post('/llm/update', data);
 }
+
+// 导演模式聊天
+export function directorModeChat(data) {
+  return request.post('/llm/superChat', data);
+}

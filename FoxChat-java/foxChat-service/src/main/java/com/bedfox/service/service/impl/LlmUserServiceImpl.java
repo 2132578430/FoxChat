@@ -183,6 +183,55 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
         return chatMsgVo;
     }
 
+    /**
+     * 导演模式聊天
+     * @param llmId
+     * @param msgContent
+     * @return
+     */
+    @Override
+    public LlmChatMsgVo llmSuperChat(String llmId, String msgContent) {
+        String userId = LoginUserHolder.getUserId();
+
+        log.info("【导演模式】聊天请求：userId={}, llmId={}, msgContent={}", userId, llmId, msgContent);
+
+        // 保存用户消息
+        LlmChatMsg llmChatMsgHuman = buildLlmChatMsg(msgContent, llmId, userId, true);
+        llmChatMsgService.save(llmChatMsgHuman);
+        log.debug("【导演模式】用户消息已保存到数据库");
+
+        // 构建请求对象
+        ChatMsgTo chatMsg = new ChatMsgTo();
+        chatMsg.setLlmId(llmId);
+        chatMsg.setMsgContent(msgContent);
+        chatMsg.setUserId(userId);
+
+        // 调用导演模式专用接口
+        log.info("【导演模式】开始调用 Python superChatMsg 接口...");
+        String resultJson = chatClient.superChatMsg(chatMsg);
+        log.info("【导演模式】收到 Python 响应：{}", resultJson);
+
+        // 解析响应
+        M<String> msg = JSON.parseObject(resultJson, new TypeReference<M<String>>() {});
+        String data = msg.getData();
+
+        if (data == null || data.isEmpty()) {
+            log.warn("【导演模式】Python 返回数据为空");
+            data = "抱歉，导演模式暂时无法回应...";
+        }
+
+        // 保存模型消息
+        LlmChatMsg llmChatMsgAi = buildLlmChatMsg(data, llmId, userId, false);
+        llmChatMsgService.save(llmChatMsgAi);
+        log.debug("【导演模式】AI 回复已保存到数据库");
+
+        LlmChatMsgVo chatMsgVo = new LlmChatMsgVo();
+        chatMsgVo.setMsg(data);
+
+        log.info("【导演模式】聊天完成：userId={}, llmId={}", userId, llmId);
+        return chatMsgVo;
+    }
+
     private LlmChatMsg buildLlmChatMsg(String msgContent, String llmId, String userId, Boolean isHuman) {
         LlmChatMsg chatMsg = new LlmChatMsg();
 
