@@ -26,9 +26,9 @@ async def super_chat_msg(chat_msg_to: ChatMsgTo, background_tasks: BackgroundTas
 
     # 调用导演模式专用 service 方法
     result = await super_chat_service.director_mode_chat(
-        user_id=chat_msg_to.user_id,
-        llm_id=chat_msg_to.llm_id,
-        msg_content=chat_msg_to.msg_content,
+        user_id=chat_msg_to.userId,
+        llm_id=chat_msg_to.llmId,
+        msg_content=chat_msg_to.msgContent,
         background_tasks=background_tasks
     )
 
