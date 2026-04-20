@@ -44,15 +44,16 @@ class ModelConfig(BaseModel):
     default_llm: str = "ds_model"
     default_json_llm: str = "json_ds_model"
     default_embedding: str = "dashscope"
+    emotion_llm: str = "json_ds_model"
 
 
 class ModelByScenario(BaseModel):
     chat_llm: str = "default"
     chat_json_llm: str = "default_json"
     memory_llm: str = "default"
-    memory_json_llm: str = "default_json"
+    memory_json_llm: str = "json_ds_model"
     summary_llm: str = "default"
-    extraction_llm: str = "default"
+    extraction_llm: str = "json_ds_model"
 
 
 class Settings(BaseSettings):

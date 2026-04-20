@@ -32,6 +32,15 @@ export function updateLlmFriend(data) {
   return request.post('/llm/update', data);
 }
 
+// 上传模型头像
+export function uploadLlmAvatar(formData) {
+  return request.post('/llm/uploadAvatar', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    }
+  });
+}
+
 // 导演模式聊天
 export function directorModeChat(data) {
   return request.post('/llm/superChat', data);

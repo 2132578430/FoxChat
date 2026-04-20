@@ -3,9 +3,11 @@ package com.bedfox.service.service;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.bedfox.pojo.domain.LlmUser;
 import com.bedfox.pojo.dto.AddLlmFriendDto;
+import com.bedfox.pojo.dto.LlmFriendUpdateDto;
 import com.bedfox.pojo.vo.FriendVo;
 import com.bedfox.pojo.vo.LlmChatMsgVo;
 import com.bedfox.pojo.vo.LlmMsgHistoryVo;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -22,11 +24,13 @@ public interface LlmUserService extends IService<LlmUser> {
 
     void deleteFriend(String friendId);
 
-    void updateFriend(String llmId, String nickname, String faceImage);
+    void updateFriend(LlmFriendUpdateDto updateDto);
 
     LlmChatMsgVo llmChat(String llmId, String msgContent);
 
     LlmChatMsgVo llmSuperChat(String llmId, String msgContent);
 
     List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime, Long lastId);
+
+    String uploadAvatar(MultipartFile file);
 }

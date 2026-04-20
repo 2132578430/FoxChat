@@ -10,7 +10,7 @@ export function getUserInfo() {
   return request.get('/user/info');
 }
 
-// Upload avatar
+// Upload avatar (for user profile)
 export function uploadAvatar(formData) {
   return request.post('/user/updateAvatar', formData, {
     headers: {

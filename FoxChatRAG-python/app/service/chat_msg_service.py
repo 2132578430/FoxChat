@@ -26,20 +26,15 @@ from app.core.prompts.prompt_template import PromptTemplate
 from app.exception.BusinessException import BusinessException
 from app.schemas import ChatMsgTo, MessageBlock
 from app.service.chat.memory_summary_service import async_summary_msg
-from app.util import chroma_util
+from app.service.chat.emotion_classifier import classify_and_update_emotion
+from app.util import chroma_util, strip_all_tags, strip_think_only
 from fastapi import BackgroundTasks
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.language_models.chat_models import BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.documents import Document
-
-
-def strip_think_tags(content: str) -> str:
-    """去除 LLM 返回的 <think> 标签及其内容"""
-    if not content:
-        return ""
-    return re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
 
 
 def parse_action_tags(content: str) -> List[MessageBlock]:
@@ -194,8 +189,6 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[Me
             character_card_examples = character_card.get("示例对话", "")
 
             parts = []
-            if character_card.get("爱称"):
-                parts.append(f"爱称：{', '.join(character_card['爱称'])}")
             if character_card.get("性格关键词"):
                 parts.append(f"性格关键词：{character_card['性格关键词']}")
             if character_card.get("动作风格"):
@@ -225,6 +218,7 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[Me
 
     # 解析用户画像
     user_profile_summary = ""
+    call_convention = ""
     if user_profile_json:
         try:
             up = json.loads(user_profile_json)
@@ -283,6 +277,7 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[Me
         "character_card": init_memory if init_memory else "",
         "mes_example": character_card_examples,
         "character_card_detail": character_card_detail if character_card_detail else "",
+        "call_convention": call_convention,
         "user_profile_summary": user_profile_summary if user_profile_summary else "",
         "memory_bank_summary": memory_bank_summary if memory_bank_summary else "",
         "relevant_memories": total_memory,
@@ -301,9 +296,14 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[Me
 
     # 触发后台任务：记忆总结（每6轮触发一次）
     background_tasks.add_task(async_summary_msg, recent_msg_key, result[0], user_id, llm_id)
-
-    # 解析返回
-    clean_response = strip_think_tags(chat_response)
+    
+    # 解析返回（保留 action 标签）
+    clean_response = strip_think_only(chat_response)
+    
+    # 触发后台任务：情绪分类（使用纯文本，清理所有标签）
+    pure_text = strip_all_tags(chat_response)
+    background_tasks.add_task(classify_and_update_emotion, user_id, llm_id, pure_text)
+    
     message_blocks = parse_action_tags(clean_response)
 
     return message_blocks
@@ -319,6 +319,8 @@ async def delete_msg(user_id: str, llm_id: str) -> None:
         build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id),
         build_memory_key(LLMChatConstant.INIT_MEMORY, user_id, llm_id),
         build_memory_key(LLMChatConstant.RECENT_MSG, user_id, llm_id),
+        build_memory_key(LLMChatConstant.ROLE_EMOTION_STATE, user_id, llm_id),
+        build_memory_key(LLMChatConstant.ROLE_EMOTION_LOG, user_id, llm_id),
     ]
 
     pip = redis_client.pipeline()

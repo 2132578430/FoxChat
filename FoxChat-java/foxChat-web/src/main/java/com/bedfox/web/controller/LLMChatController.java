@@ -1,6 +1,7 @@
 package com.bedfox.web.controller;
 
 import com.bedfox.pojo.dto.AddLlmFriendDto;
+import com.bedfox.pojo.dto.LlmFriendUpdateDto;
 import com.bedfox.pojo.dto.LlmMsgHistoryReqDto;
 import com.bedfox.service.service.LlmUserService;
 import com.bedfox.common.util.R;
@@ -9,6 +10,7 @@ import com.bedfox.pojo.vo.LlmMsgHistoryVo;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -62,12 +64,17 @@ public class LLMChatController {
     }
 
     @PostMapping("/update")
-    public R<Void> updateLlmFriend(@RequestBody Map<String, Object> requestMap) {
-        String llmId = (String) requestMap.get("llmId");
-        String nickname = (String) requestMap.get("nickname");
-        String faceImage = (String) requestMap.get("faceImage");
-
-        llmUserService.updateFriend(llmId, nickname, faceImage);
+    public R<Void> updateLlmFriend(@RequestBody LlmFriendUpdateDto updateDto) {
+        llmUserService.updateFriend(updateDto);
         return R.ok();
+    }
+
+    /**
+     * 模型头像上传接口
+     */
+    @PostMapping("/uploadAvatar")
+    public R<String> uploadAvatar(@RequestParam("file") MultipartFile file) {
+        String fileUrl = llmUserService.uploadAvatar(file);
+        return R.ok(fileUrl);
     }
 }

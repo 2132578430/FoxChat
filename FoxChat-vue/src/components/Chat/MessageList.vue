@@ -115,6 +115,8 @@ const emit = defineEmits(['select-message', 'load-more', 'scroll-bottom', 'open-
 
 const messageContainerRef = ref(null);
 const defaultUserAvatar = 'https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png';
+const isUserScrolling = ref(false);
+let scrollTimeout = null;
 
 // 辅助函数：处理头像URL
 const resolveAvatarUrl = (url) => {
@@ -131,9 +133,21 @@ const resolveAvatarUrl = (url) => {
 
 const handleScroll = (e) => {
   const container = e.target;
-  emit('scroll-bottom', container);
+  
+  // 清除之前的超时
+  if (scrollTimeout) {
+    clearTimeout(scrollTimeout);
+  }
+  
+  // 用户在滚动，设置标志
+  isUserScrolling.value = true;
+  
+  // 滚动停止后 500ms 清除标志（给用户足够时间停止滚动）
+  scrollTimeout = setTimeout(() => {
+    isUserScrolling.value = false;
+  }, 500);
 
-  // 当滚动到顶部（scrollTop 为 0）时，加载更多
+  // 当滚动到顶部（scrollTop 为 0）时，加载更多历史消息
   if (container.scrollTop === 0) {
     emit('load-more');
   }
@@ -225,11 +239,16 @@ const getScoreLabel = (score) => {
 
 // 暴露方法给父组件
 defineExpose({
-  scrollToBottom: () => {
+  scrollToBottom: (force = false) => {
     if (messageContainerRef.value) {
+      // 如果用户正在滚动且不是强制滚动，则不自动滚动
+      if (isUserScrolling.value && !force) {
+        return;
+      }
       messageContainerRef.value.scrollTop = messageContainerRef.value.scrollHeight;
     }
-  }
+  },
+  isUserScrolling: isUserScrolling
 });
 </script>
 

@@ -5,18 +5,18 @@ import com.alibaba.fastjson2.TypeReference;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.bedfox.common.constant.ChatRoleConstant;
+import com.bedfox.common.constant.FileContstant;
+import com.bedfox.common.util.*;
 import com.bedfox.pojo.domain.LlmChatMsg;
 import com.bedfox.pojo.domain.LlmUser;
 import com.bedfox.pojo.dto.AddLlmFriendDto;
+import com.bedfox.pojo.dto.LlmFriendUpdateDto;
 import com.bedfox.service.mapper.LlmUserMapper;
 import com.bedfox.service.remote.ChatClient;
 import com.bedfox.service.service.LlmChatMsgService;
 import com.bedfox.service.service.LlmUserService;
 import com.bedfox.pojo.to.ChatMqMsgTo;
 import com.bedfox.pojo.to.ChatMsgTo;
-import com.bedfox.common.util.LoginUserHolder;
-import com.bedfox.common.util.M;
-import com.bedfox.common.util.MqUtil;
 import com.bedfox.pojo.vo.FriendVo;
 import com.bedfox.pojo.vo.LlmChatMsgVo;
 import com.bedfox.pojo.vo.LlmMsgHistoryVo;
@@ -28,7 +28,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.List;
 
-import com.bedfox.common.util.TimeUtil;
+import org.springframework.web.multipart.MultipartFile;
 
 
 /**
@@ -43,6 +43,9 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
 
     @Resource
     MqUtil mqUtil;
+
+    @Resource
+    MinioUtil minioUtil;
 
     @Resource
     ChatClient chatClient;
@@ -130,19 +133,17 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
 
     /**
      * 更新llm好友信息
-     * @param llmId
-     * @param nickname
-     * @param faceImage
+     * @param updateDto
      */
     @Override
-    public void updateFriend(String llmId, String nickname, String faceImage) {
+    public void updateFriend(LlmFriendUpdateDto updateDto) {
         String userId = LoginUserHolder.getUserId();
-        LlmUser llmUser = getById(llmId);
+        LlmUser llmUser = getById(updateDto.getLlmId());
         if (llmUser == null || !llmUser.getUserId().equals(userId)) {
             return;
         }
-        llmUser.setLlmName(nickname);
-        llmUser.setFaceImage(faceImage);
+        llmUser.setLlmName(updateDto.getNickname());
+        llmUser.setFaceImage(updateDto.getFaceImage());
         updateById(llmUser);
     }
 
@@ -168,6 +169,8 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
         String resultJson = chatClient.chatMsg(chatMsg);
 
         log.info("接收到消息：{}", resultJson);
+
+        resultJson = resultJson.replaceAll("</?[a-zA-Z_]+>", "");
 
         M<String> msg = JSON.parseObject(resultJson, new TypeReference<M<String>>() {});
         String data = msg.getData();
@@ -265,5 +268,16 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
                     return chatMsgVo;
                 })
                 .toList();
+    }
+
+    /**
+     * 上传模型头像
+     * @param file 文件
+     * @return 文件URL
+     */
+    @Override
+    public String uploadAvatar(MultipartFile file) {
+        String userId = LoginUserHolder.getUserId();
+        return minioUtil.uploadFile(file, FileContstant.LLM_AVATAR_BIZPATH, userId);
     }
 }

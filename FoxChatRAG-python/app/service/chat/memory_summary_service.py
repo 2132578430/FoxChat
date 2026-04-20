@@ -26,6 +26,9 @@ from app.service.chat.user_profile_service import update_user_profile_in_summary
 MEMORY_BANK_MAX_SIZE = 50
 MEMORY_BANK_COMPRESS_TARGET = 30
 
+RECENT_MSG_KEEP_SIZE = 10
+SUMMARY_TRIGGER_THRESHOLD = 14
+
 
 async def _build_summary_chain():
     """构建消息总结 Chain"""
@@ -76,6 +79,11 @@ async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
         for event in events:
             if "time" not in event or not event["time"]:
                 event["time"] = current_time
+            if "actor" not in event or not event["actor"]:
+                event["actor"] = "UNKNOWN"
+                logger.warning(f"事件缺少 actor 字段，已设置默认值: {event.get('content', '')}")
+            if "keywords" not in event:
+                event["keywords"] = []
         return events
     except json.JSONDecodeError:
         logger.warning(f"事件提取 JSON 解析失败: {result}")
@@ -125,7 +133,9 @@ async def _compress_memory_bank_if_needed(user_id: str, llm_id: str) -> None:
     要求：
     - 合并相似事件
     - 保留最重要的关键事件
-    - 保持 time、type、content 字段
+    - 保持 time、type、actor、content、keywords 字段
+    - actor 字段必须保留，明确主体归属
+    - keywords 字段合并相似关键词
     - 输出 JSON 数组格式
     - 只输出 JSON 数组，不要其他文字
 
@@ -161,25 +171,27 @@ async def _summary_and_upload(recent_msg_list: List[str], user_id: str, llm_id: 
 
 async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
     """
-    异步消息总结主流程（每6轮触发一次）
+    异步消息总结主流程（每7轮触发一次）
 
     流程：
-    1. 取出最近消息，保留最近10条
+    1. 取出最近消息，保留最近 RECENT_MSG_KEEP_SIZE 条
     2. 总结消息存入向量数据库
     3. 提取关键事件存入 Memory Bank
     4. 检查并压缩 Memory Bank（如需要）
     5. 更新用户画像
     """
-    if recent_msg_size < 12:
+    if recent_msg_size < SUMMARY_TRIGGER_THRESHOLD:
         return
 
     pip = redis_client.pipeline()
-    pip.lrange(recent_msg_key, 9, -1)
-    pip.ltrim(recent_msg_key, 0, 9)
+    pip.lrange(recent_msg_key, RECENT_MSG_KEEP_SIZE, -1)
+    pip.ltrim(recent_msg_key, 0, RECENT_MSG_KEEP_SIZE - 1)
 
     result = pip.execute()
     recent_msg_list: list[str] = result[0]
     recent_msg_list.reverse()
+
+    logger.debug(f"记忆总结触发: 原始 {recent_msg_size} 条, 保留 {RECENT_MSG_KEEP_SIZE} 条, 总结 {len(recent_msg_list)} 条")
 
     await _summary_and_upload(recent_msg_list, user_id, llm_id)
 

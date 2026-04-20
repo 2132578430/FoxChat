@@ -186,7 +186,7 @@
     <!-- Edit LLM Friend Dialog -->
     <el-dialog v-model="showEditLlmFriendDialog" title="修改模型" width="400px" center destroy-on-close>
       <div class="edit-llm-avatar-section">
-        <div class="edit-llm-avatar-wrapper" @click="showAvatarCropper = true">
+        <div class="edit-llm-avatar-wrapper" @click="openLlmAvatarCropper">
           <el-avatar :size="100" :src="resolveAvatarUrl(editLlmFriendForm.faceImage) || defaultUserAvatar"></el-avatar>
           <div class="edit-llm-avatar-mask">
             <el-icon :size="24"><UploadFilled /></el-icon>
@@ -255,7 +255,7 @@
       @director-mode-change="handleDirectorModeChange"
     />
     <!-- Avatar Cropper Dialog -->
-    <AvatarCropper v-model:visible="showAvatarCropper" @success="handleAvatarSuccess" />
+    <AvatarCropper v-model:visible="showAvatarCropper" :type="isAvatarCropperForLlm ? 'llm' : 'user'" @success="handleAvatarSuccess" @blob="handleAvatarBlob" />
   </div>
 </template>
 
@@ -297,6 +297,7 @@ const isLoadingHistory = ref(false);
 const hasMoreHistory = ref(true);
 const lastTimestamp = ref(null);
 const lastMsgId = ref(null);
+const uploadingAvatar = ref(false);
 const searchText = ref('');
 const showFriendList = ref(false);
 const showGroupList = ref(false);
@@ -642,7 +643,12 @@ const handleDeleteMessages = async () => {
 };
 
 const handleEditAvatar = () => {
-  // 标志位由 handleEditLlmFriend / handleEditLlmFriend 设置，无需重复修改
+  isAvatarCropperForLlm.value = false;
+  showAvatarCropper.value = true;
+};
+
+const openLlmAvatarCropper = () => {
+  isAvatarCropperForLlm.value = true;
   showAvatarCropper.value = true;
 };
 
@@ -656,6 +662,34 @@ const handleAvatarSuccess = (newAvatarUrl) => {
     userInfo.faceImage = newAvatarUrl;
     profileInfo.value.faceImage = newAvatarUrl;
     localStorage.setItem('userInfo', JSON.stringify(userInfo));
+  }
+};
+
+const handleAvatarBlob = async (blob) => {
+  if (!blob) return;
+  
+  uploadingAvatar.value = true;
+  try {
+    const formData = new FormData();
+    formData.append('file', blob, 'avatar.png');
+    
+    const res = await friendApi.uploadLlmAvatar(formData);
+    
+    uploadingAvatar.value = false;
+    
+    if (res && typeof res === 'string' && res.startsWith('http')) {
+      editLlmFriendForm.faceImage = res;
+      ElMessage.success('模型头像上传成功啦 ✨');
+    } else if (res && res.data) {
+      editLlmFriendForm.faceImage = res.data;
+      ElMessage.success('模型头像上传成功啦 ✨');
+    } else {
+      ElMessage.error('上传失败');
+    }
+  } catch (error) {
+    uploadingAvatar.value = false;
+    console.error('上传模型头像失败:', error);
+    ElMessage.error('上传失败，请稍后再试');
   }
 };
 
@@ -919,7 +953,7 @@ const handleMessage = async (rawInput) => {
             senderAvatar: currentFriend.value.faceImage || currentFriend.value.face_image
           });
         nextTick(() => {
-          scrollToBottom();
+          scrollToBottom(true);
         });
       } 
       // 情况B：如果是自己发的消息（多端同步或服务器回显）
@@ -955,7 +989,7 @@ const handleMessage = async (rawInput) => {
               senderAvatar: userInfo.faceImage || userInfo.face_image
             });
             nextTick(() => {
-              scrollToBottom();
+              scrollToBottom(true);
             });
           }
         }
@@ -1043,7 +1077,7 @@ const handleMessage = async (rawInput) => {
             });
             
             nextTick(() => {
-              scrollToBottom();
+              scrollToBottom(true);
             });
           }
         } else {
@@ -1337,7 +1371,7 @@ const selectFriend = async (friend) => {
         }
 
         nextTick(() => {
-          scrollToBottom();
+          scrollToBottom(true);
         });
       } catch (error) {
         console.error('获取 LLM 历史记录失败:', error);
@@ -1540,19 +1574,23 @@ const getChatHistory = async (targetId, isFirstLoad = false) => {
       if (isFirstLoad) {
         messageList.value = formattedMsgs;
         nextTick(() => {
-          scrollToBottom();
+          scrollToBottom(true);
         });
       } else {
         // 向上滚动加载更多时
-        const container = messageContainer.value;
-        const previousHeight = container.scrollHeight;
-        
-        // 将旧消息批次整体插入到现有消息列表的顶部
-        messageList.value = [...formattedMsgs, ...messageList.value];
-        
-        nextTick(() => {
-          container.scrollTop = container.scrollHeight - previousHeight;
-        });
+        const container = messageListRef.value?.$el;
+        if (container) {
+          const previousHeight = container.scrollHeight;
+          
+          // 将旧消息批次整体插入到现有消息列表的顶部
+          messageList.value = [...formattedMsgs, ...messageList.value];
+          
+          nextTick(() => {
+            container.scrollTop = container.scrollHeight - previousHeight;
+          });
+        } else {
+          messageList.value = [...formattedMsgs, ...messageList.value];
+        }
       }
 
       // 更新“最旧”的消息时间戳，用于下次加载更早的消息
@@ -1623,7 +1661,7 @@ const sendMessage = async () => {
 
     inputMessage.value = '';
     nextTick(() => {
-      scrollToBottom();
+      scrollToBottom(true);
     });
 
     // 2. 发送 HTTP POST 请求给 LLM 接口，静默模式不触发全局 loading
@@ -1708,7 +1746,7 @@ const sendMessage = async () => {
         });
         
         nextTick(() => {
-          scrollToBottom();
+          scrollToBottom(true);
         });
       }
     } catch (error) {
@@ -1774,7 +1812,7 @@ const sendMessage = async () => {
 
       inputMessage.value = '';
       nextTick(() => {
-        scrollToBottom();
+        scrollToBottom(true);
       });
 
     } else if (currentChatType.value === 'group') {
@@ -1827,7 +1865,7 @@ const sendMessage = async () => {
 
       inputMessage.value = '';
       nextTick(() => {
-        scrollToBottom();
+        scrollToBottom(true);
       });
 
     }
@@ -1837,13 +1875,24 @@ const sendMessage = async () => {
   }
 };
 
-const scrollToBottom = () => {
+const scrollToBottom = (force = false) => {
   nextTick(() => {
     // 调用子组件的 scrollToBottom 方法
     if (messageListRef.value?.scrollToBottom) {
-      messageListRef.value.scrollToBottom();
+      messageListRef.value.scrollToBottom(force);
     }
   });
+};
+
+// 加载更多历史消息
+const loadMoreHistory = () => {
+  const targetId = currentChatType.value === 'group' 
+    ? (currentGroup.value.id || currentGroup.value.groupId)
+    : (currentFriend.value.userId || currentFriend.value.id);
+  
+  if (targetId) {
+    getChatHistory(targetId, false);
+  }
 };
 
 const groupList = ref([]);

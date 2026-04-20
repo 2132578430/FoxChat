@@ -14,4 +14,5 @@ public class FileContstant {
 
     public static final String CHAT_BIZPATH = "chat";
     public static final String RAG_BIZPATH = "rag";
+    public static final String LLM_AVATAR_BIZPATH = "llm/avatar";
 }

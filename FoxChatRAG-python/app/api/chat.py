@@ -13,7 +13,7 @@ async def chat_msg(chat_msg_to: ChatMsgTo, background_tasks: BackgroundTasks, re
 
     logger.info(f"接收到消息：{chat_msg_to}")
 
-    result = await chat_msg_service.chat_msg(chat_msg_to, background_tasks, request)
+    result = await chat_msg_service.chat_msg(chat_msg_to, background_tasks)
 
     logger.info(f"收到回复：{result}")
 

@@ -300,3 +300,14 @@ async def get_extraction_model():
     logger.debug(f"获取抽取模型: {model_name}")
     return LLM_MAP.get(model_name)
 
+
+async def get_emotion_model():
+    """获取情绪分类场景的 LLM。
+
+    Returns:
+        情绪分类模型实例
+    """
+    model_name = global_settings.model.emotion_llm
+    logger.debug(f"获取情绪分类模型: {model_name}")
+    return LLM_MAP.get(model_name)
+

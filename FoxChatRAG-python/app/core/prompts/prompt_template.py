@@ -18,6 +18,9 @@ class PromptTemplate(StrEnum):
     【角色特征补充】
     {character_card_detail}
 
+    【称呼约定】
+    {call_convention}
+
     【用户画像】
     {user_profile_summary}
 

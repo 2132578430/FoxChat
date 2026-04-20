@@ -96,10 +96,15 @@ const props = defineProps({
   visible: {
     type: Boolean,
     default: false
+  },
+  type: {
+    type: String,
+    default: 'user',
+    validator: (value) => ['user', 'llm'].includes(value)
   }
 });
 
-const emit = defineEmits(['update:visible', 'success']);
+const emit = defineEmits(['update:visible', 'success', 'blob']);
 
 const dialogVisible = ref(false);
 const imageUrl = ref('');
@@ -182,6 +187,14 @@ const handleUpload = () => {
     if (!blob) {
       ElMessage.error('图片处理失败，请重试');
       loading.value = false;
+      return;
+    }
+    
+    // 如果是模型头像，不上传到 /user/updateAvatar，而是触发 blob 事件
+    if (props.type === 'llm') {
+      loading.value = false;
+      emit('blob', blob);
+      handleClose();
       return;
     }
     
