@@ -33,11 +33,12 @@ import java.util.stream.IntStream;
 
 /**
  * @author bedFox
+ * @description 模型逻辑实现，包含RAG和聊天逻辑
  * @date 2026/3/15 12:21
  */
 @Service
 @Slf4j
-public class RAGServiceImpl implements RAGService {
+public class LLMServiceImpl implements RAGService {
 
     @Resource
     RagFileService ragFileService;
