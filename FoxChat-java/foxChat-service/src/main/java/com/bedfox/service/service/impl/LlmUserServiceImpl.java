@@ -148,7 +148,7 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
     }
 
     /**
-     * 聊天主lu
+     * 聊天主逻辑
      * @param llmId
      * @param msgContent
      * @return
@@ -172,7 +172,7 @@ public class LlmUserServiceImpl extends ServiceImpl<LlmUserMapper, LlmUser>
 
         resultJson = resultJson.replaceAll("</?[a-zA-Z_]+>", "");
 
-        M<String> msg = JSON.parseObject(resultJson, new TypeReference<M<String>>() {});
+        M<String> msg = JSON.parseObject(resultJson, new TypeReference<>() {});
         String data = msg.getData();
 
         // 保存模型消息

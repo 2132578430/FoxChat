@@ -38,7 +38,7 @@ import java.util.stream.IntStream;
  */
 @Service
 @Slf4j
-public class LLMServiceImpl implements RAGService {
+public class RAGServiceImpl implements RAGService {
 
     @Resource
     RagFileService ragFileService;
