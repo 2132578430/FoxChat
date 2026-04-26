@@ -12,6 +12,7 @@
 
 import json
 import re
+from dataclasses import dataclass
 from typing import List
 
 from loguru import logger
@@ -34,8 +35,328 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.language_models.chat_models import BaseMessage
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.documents import Document
 
+
+@dataclass
+class ChatMemories:
+    """聊天所需的记忆数据容器"""
+    init_memory: str
+    recent_msg: List[str]
+    character_card_json: str
+    core_anchor_json: str
+    user_profile_json: str
+    memory_bank_json: str
+
+
+@dataclass
+class ParsedMemories:
+    """解析后的记忆数据容器"""
+    character_card_examples: str
+    character_card_detail: str
+    role_declaration: str
+    core_anchor_text: str
+    user_profile_summary: str
+    memory_bank_summary: str
+
+async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[MessageBlock]:
+    """
+    对话主流程
+
+    流程：
+    1. 批量获取各种记忆
+    2. 解析记忆为可读文本
+    3. 构建历史消息
+    4. 调用 LLM
+    5. 保存对话
+    6. 触发后台任务
+    7. 解析返回
+    """
+    user_id = msg.userId
+    llm_id = msg.llmId
+    msg_content = msg.msgContent
+
+    # 1. 获取所有的记忆事件+人物卡+角色核心等等
+    memories = await _fetch_all_memories(user_id, llm_id)
+
+    # 2. 解析记忆
+    parsed = _parse_all_memories(memories)
+
+    # 3. 构建历史消息
+    history_msg = await _build_history_message(memories.recent_msg)
+
+    # 4. 调用 LLM
+    recent_msg_key = _build_recent_msg_key(user_id, llm_id)
+    chat_response = await _invoke_llm(
+        parsed, history_msg, memories.init_memory, msg_content
+    )
+
+    # 5. 保存对话
+    msg_count = await _save_chat_to_redis(
+        recent_msg_key, msg_content, chat_response
+    )
+
+    # 6. 触发后台任务
+    background_tasks.add_task(async_summary_msg, recent_msg_key, msg_count, user_id, llm_id)
+    pure_text = strip_all_tags(chat_response)
+    background_tasks.add_task(classify_and_update_emotion, user_id, llm_id, pure_text)
+
+    # 7. 解析返回
+    clean_response = strip_think_only(chat_response)
+    return parse_action_tags(clean_response)
+
+
+async def delete_msg(user_id: str, llm_id: str) -> None:
+    """删除对话相关的所有记忆"""
+    keys_to_delete = [
+        build_memory_key(LLMChatConstant.RAW_EXPERIENCE, user_id, llm_id),
+        build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id),
+        build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id),
+        build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id),
+        build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id),
+        build_memory_key(LLMChatConstant.INIT_MEMORY, user_id, llm_id),
+        build_memory_key(LLMChatConstant.RECENT_MSG, user_id, llm_id),
+        build_memory_key(LLMChatConstant.ROLE_EMOTION_STATE, user_id, llm_id),
+        build_memory_key(LLMChatConstant.ROLE_EMOTION_LOG, user_id, llm_id),
+    ]
+
+    pip = redis_client.pipeline()
+    for key in keys_to_delete:
+        pip.delete(key)
+    pip.execute()
+
+    await chroma_util.delete(ChromaTypeConstant.CHAT, user_id=user_id, llm_id=llm_id)
+
+async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
+    """批量获取所有记忆数据"""
+    init_memory_key = _build_init_memory_key(user_id, llm_id)
+    recent_msg_key = _build_recent_msg_key(user_id, llm_id)
+
+    pip = redis_client.pipeline()
+    pip.get(init_memory_key)
+    pip.lrange(recent_msg_key, 0, 29)
+    pip.get(build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id))
+    pip.get(build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id))
+    pip.get(build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id))
+    pip.get(build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id))
+
+    result = pip.execute()
+
+    return ChatMemories(
+        init_memory=result[0] or "",
+        recent_msg=result[1],
+        character_card_json=result[2] or "",
+        core_anchor_json=result[3] or "",
+        user_profile_json=result[4] or "",
+        memory_bank_json=result[5] or "",
+    )
+
+
+def _parse_all_memories(memories: ChatMemories) -> ParsedMemories:
+    """解析所有记忆数据"""
+    character_card_examples, character_card_detail = _parse_character_card(memories.character_card_json)
+    role_declaration, core_anchor_text = _parse_core_anchor(memories.core_anchor_json)
+    user_profile_summary = _parse_user_profile(memories.user_profile_json)
+    memory_bank_summary = _parse_memory_bank(memories.memory_bank_json)
+
+    return ParsedMemories(
+        character_card_examples=character_card_examples,
+        character_card_detail=character_card_detail,
+        role_declaration=role_declaration,
+        core_anchor_text=core_anchor_text,
+        user_profile_summary=user_profile_summary,
+        memory_bank_summary=memory_bank_summary,
+    )
+
+
+def _parse_character_card(json_str: str) -> tuple[str, str]:
+    """解析角色卡，返回 (示例对话, 详细描述)"""
+    if not json_str:
+        return "", ""
+
+    try:
+        card = json.loads(json_str)
+        examples = card.get("示例对话", "")
+
+        parts = []
+        if card.get("性格关键词"):
+            parts.append(f"性格关键词：{card['性格关键词']}")
+        if card.get("动作风格"):
+            parts.append(f"动作风格：{card['动作风格']}")
+        if card.get("常用动作"):
+            parts.append(f"常用动作：{', '.join(card['常用动作'])}")
+        if card.get("核心描述"):
+            parts.append(f"核心描述：{card['核心描述']}")
+
+        return examples, "\n".join(parts) if parts else ""
+    except json.JSONDecodeError:
+        logger.warning("角色卡JSON解析失败")
+        return "", ""
+
+
+def _parse_core_anchor(text: str) -> tuple[str, str]:
+    """解析核心锚点，返回 (角色声明, 核心锚点文本)"""
+    if not text:
+        return "", ""
+
+    role_declaration = ""
+    core_anchor_text = ""
+
+    role_match = re.search(r'【角色声明】\s*(.+?)(?=【角色核心锚点】|$)', text, re.DOTALL)
+    if role_match:
+        role_declaration = role_match.group(1).strip()
+
+    anchor_match = re.search(r'【角色核心锚点】\s*(.+?)(?=【绝对边界】|$)', text, re.DOTALL)
+    if anchor_match:
+        core_anchor_text = anchor_match.group(1).strip()
+
+    return role_declaration, core_anchor_text
+
+
+def _parse_user_profile(json_str: str) -> str:
+    """解析用户画像"""
+    if not json_str:
+        return ""
+
+    try:
+        profile = json.loads(json_str)
+        parts = []
+        for dim_key, dim_val in profile.items():
+            if isinstance(dim_val, dict):
+                items = [f"{k}：{v}" for k, v in dim_val.items() if v and v != "[未提及]"]
+                if items:
+                    parts.append(f"{dim_key}：{', '.join(items)}")
+            elif isinstance(dim_val, list):
+                filtered = [v for v in dim_val if v and v != "[未提及]"]
+                if filtered:
+                    parts.append(f"{dim_key}：{', '.join(filtered)}")
+            elif dim_val and dim_val != "[未提及]":
+                parts.append(f"{dim_key}：{dim_val}")
+        return "\n".join(parts) if parts else ""
+    except json.JSONDecodeError:
+        logger.warning("user_profile JSON解析失败")
+        return ""
+
+
+def _parse_memory_bank(json_str: str) -> str:
+    """解析 Memory Bank"""
+    if not json_str:
+        return ""
+
+    try:
+        bank = json.loads(json_str)
+        if not isinstance(bank, list) or not bank:
+            return ""
+
+        lines = []
+        for item in bank:
+            time_val = item.get("time", "某时")
+            content_val = item.get("content", "")
+            type_val = item.get("type", "event")
+            lines.append(f"- [{time_val}]（{type_val}）{content_val}")
+        return "\n".join(lines)
+    except json.JSONDecodeError:
+        logger.warning("memory_bank JSON解析失败")
+        return ""
+
+
+# ==================== 私有函数 - LLM调用 ====================
+
+async def _build_chat_chain():
+    """构建对话 Chain"""
+    template = ChatPromptTemplate(
+        [
+            ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
+            MessagesPlaceholder("history_msg"),
+            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：\n{user_message}")
+        ]
+    )
+
+    str_parser = StrOutputParser()
+    llm = await llm_model.get_chat_model()
+    chain = template | RunnableLambda(_print_template) | llm | str_parser
+    return chain
+
+
+async def _invoke_llm(
+    parsed: ParsedMemories,
+    history_msg: List[BaseMessage],
+    init_memory: str,
+    msg_content: str
+) -> str:
+    """调用 LLM 生成回复"""
+    chain = await _build_chat_chain()
+    soul = await PromptManager.get_soul("soul")
+
+    logger.debug("api调用llm最后提示")
+    return await chain.ainvoke({
+        "soul": soul or "",
+        "role_declaration": parsed.role_declaration,
+        "core_anchor": parsed.core_anchor_text,
+        "character_card": init_memory,
+        "mes_example": parsed.character_card_examples,
+        "character_card_detail": parsed.character_card_detail,
+        "call_convention": "",
+        "user_profile_summary": parsed.user_profile_summary,
+        "memory_bank_summary": parsed.memory_bank_summary,
+        "relevant_memories": "",
+        "recent_chat": "",
+        "history_msg": history_msg,
+        "user_message": msg_content,
+    })
+
+
+def _print_template(template_value):
+    """打印注入的模板变量（调试用）"""
+    logger.debug(f"注入消息：（省略）")
+    return template_value
+
+
+# ==================== 私有函数 - 历史消息 ====================
+
+async def _build_history_message(recent_msg: List[str]) -> List[BaseMessage]:
+    """将 Redis 中的消息列表转换为 LangChain 的历史消息格式"""
+    if not recent_msg:
+        return []
+
+    history_msg: List[BaseMessage] = []
+    for msg_json in reversed(recent_msg):
+        msg: dict = json.loads(msg_json)
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role == "human":
+            history_msg.append(HumanMessage(content))
+        elif role == "ai":
+            history_msg.append(AIMessage(content))
+        else:
+            raise BusinessException(MsgStatusConstant.UNKNOWN_ROLE_ERROR)
+
+    return history_msg
+
+
+# ==================== 私有函数 - Redis操作 ====================
+
+def _build_init_memory_key(user_id: str, llm_id: str) -> str:
+    """构建初始化记忆的 Redis key"""
+    return LLMChatConstant.CHAT_MEMORY + user_id + ":" + llm_id + ":" + LLMChatConstant.INIT_MEMORY
+
+
+def _build_recent_msg_key(user_id: str, llm_id: str) -> str:
+    """构建最近消息的 Redis key"""
+    return LLMChatConstant.CHAT_MEMORY + user_id + ":" + llm_id + ":" + LLMChatConstant.RECENT_MSG
+
+
+async def _save_chat_to_redis(recent_msg_key: str, msg_content: str, chat_response: str) -> int:
+    """保存对话到 Redis，返回消息总数"""
+    pip = redis_client.pipeline()
+    pip.lpush(recent_msg_key, json.dumps({"role": "human", "content": msg_content}))
+    pip.lpush(recent_msg_key, json.dumps({"role": "ai", "content": chat_response}))
+    pip.llen(recent_msg_key)
+    result = pip.execute()
+    return result[0]
+
+
+# ==================== 公开函数 - 响应解析 ====================
 
 def parse_action_tags(content: str) -> List[MessageBlock]:
     """解析 <action> 标签，将消息分割成多个消息块"""
@@ -72,260 +393,3 @@ def parse_action_tags(content: str) -> List[MessageBlock]:
             blocks.append(MessageBlock(type="action", action=action_text, text=None))
 
     return blocks
-
-
-async def _documents_format(documents: List[Document]) -> str:
-    """将文档列表格式化为 JSON 字符串"""
-    format_str = "["
-    for doc in documents:
-        format_str = format_str + doc.page_content + ", "
-    format_str += "]"
-    return format_str
-
-
-async def print_template(template_value):
-    """打印注入的模板变量（调试用）"""
-    logger.debug(f"注入消息：{template_value}")
-    return template_value
-
-
-async def _build_chat_chain():
-    """构建对话 Chain"""
-    template = ChatPromptTemplate(
-        [
-            ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
-            MessagesPlaceholder("history_msg"),
-            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：\n{user_message}")
-        ]
-    )
-
-    str_parser = StrOutputParser()
-    llm = await llm_model.get_chat_model()
-    chain = template | RunnableLambda(print_template) | llm | str_parser
-    return chain
-
-
-async def _build_history_message(recent_msg: List[str]) -> List[BaseMessage]:
-    """将 Redis 中的消息列表转换为 LangChain 的历史消息格式"""
-    if len(recent_msg) == 0:
-        return []
-
-    history_msg: List[BaseMessage] = []
-
-    for msg_json in reversed(recent_msg):
-        msg: dict = json.loads(msg_json)
-        role = msg.get("role")
-        content = msg.get("content")
-
-        if role == "human":
-            history_msg.append(HumanMessage(content))
-        elif role == "ai":
-            history_msg.append(AIMessage(content))
-        else:
-            raise BusinessException(MsgStatusConstant.UNKNOWN_ROLE_ERROR)
-
-    return history_msg
-
-
-async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[MessageBlock]:
-    """
-    对话主流程
-
-    流程：
-    1. 批量获取各种记忆（初始化记忆、角色卡、核心锚点、用户画像、Memory Bank）
-    2. 格式化记忆为可读文本
-    3. 获取对话历史
-    4. 检索相关记忆
-    5. 构建 Prompt，调用 LLM
-    6. 保存对话到 Redis
-    7. 触发后台任务（记忆总结）
-    8. 解析 LLM 返回并返回
-    """
-    llm_id = msg.llmId
-    msg_content = msg.msgContent
-    user_id = msg.userId
-
-    # 构建 Redis key
-    init_memory_key = (LLMChatConstant.CHAT_MEMORY +
-                       user_id + ":" +
-                       llm_id + ":" +
-                       LLMChatConstant.INIT_MEMORY)
-    recent_msg_key = (LLMChatConstant.CHAT_MEMORY +
-                      user_id + ":" +
-                      llm_id + ":" +
-                      LLMChatConstant.RECENT_MSG)
-
-    pip = redis_client.pipeline()
-
-    character_card_key = build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id)
-    core_anchor_key = build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id)
-    user_profile_key = build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id)
-    memory_bank_key = build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id)
-
-    # 批量获取
-    pip.get(init_memory_key)
-    pip.lrange(recent_msg_key, 0, 29)
-    pip.get(character_card_key)
-    pip.get(core_anchor_key)
-    pip.get(user_profile_key)
-    pip.get(memory_bank_key)
-
-    result = pip.execute()
-
-    # 提取记忆
-    init_memory: str = result[0]
-    recent_msg: List[str] = result[1]
-    character_card_json: str = result[2]
-    core_anchor_json: str = result[3]
-    user_profile_json: str = result[4]
-    memory_bank_json: str = result[5]
-
-    # 解析角色卡
-    character_card_examples = ""
-    character_card_detail = ""
-    if character_card_json:
-        try:
-            character_card = json.loads(character_card_json)
-            character_card_examples = character_card.get("示例对话", "")
-
-            parts = []
-            if character_card.get("性格关键词"):
-                parts.append(f"性格关键词：{character_card['性格关键词']}")
-            if character_card.get("动作风格"):
-                parts.append(f"动作风格：{character_card['动作风格']}")
-            if character_card.get("常用动作"):
-                parts.append(f"常用动作：{', '.join(character_card['常用动作'])}")
-            if character_card.get("核心描述"):
-                parts.append(f"核心描述：{character_card['核心描述']}")
-            if parts:
-                character_card_detail = "\n".join(parts)
-        except json.JSONDecodeError:
-            logger.warning(f"角色卡JSON解析失败")
-            character_card_examples = ""
-            character_card_detail = ""
-
-    # 解析核心锚点
-    role_declaration = ""
-    core_anchor_text = ""
-    if core_anchor_json:
-        role_declaration_match = re.search(r'【角色声明】\s*(.+?)(?=【角色核心锚点】|$)', core_anchor_json, re.DOTALL)
-        if role_declaration_match:
-            role_declaration = role_declaration_match.group(1).strip()
-
-        core_anchor_match = re.search(r'【角色核心锚点】\s*(.+?)(?=【绝对边界】|$)', core_anchor_json, re.DOTALL)
-        if core_anchor_match:
-            core_anchor_text = core_anchor_match.group(1).strip()
-
-    # 解析用户画像
-    user_profile_summary = ""
-    call_convention = ""
-    if user_profile_json:
-        try:
-            up = json.loads(user_profile_json)
-            parts = []
-            for dim_key, dim_val in up.items():
-                if isinstance(dim_val, dict):
-                    items = [f"{k}：{v}" for k, v in dim_val.items() if v and v != "[未提及]"]
-                    if items:
-                        parts.append(f"{dim_key}：{', '.join(items)}")
-                elif isinstance(dim_val, list):
-                    filtered = [v for v in dim_val if v and v != "[未提及]"]
-                    if filtered:
-                        parts.append(f"{dim_key}：{', '.join(filtered)}")
-                elif dim_val and dim_val != "[未提及]":
-                    parts.append(f"{dim_key}：{dim_val}")
-            if parts:
-                user_profile_summary = "\n".join(parts)
-        except json.JSONDecodeError:
-            logger.warning(f"user_profile JSON解析失败")
-
-    # 解析 Memory Bank
-    memory_bank_summary = ""
-    if memory_bank_json:
-        try:
-            mb = json.loads(memory_bank_json)
-            if isinstance(mb, list) and mb:
-                lines = []
-                for item in mb:
-                    time_val = item.get("time", "某时")
-                    content_val = item.get("content", "")
-                    type_val = item.get("type", "event")
-                    lines.append(f"- [{time_val}]（{type_val}）{content_val}")
-                memory_bank_summary = "\n".join(lines)
-        except json.JSONDecodeError:
-            logger.warning(f"memory_bank JSON解析失败")
-
-    # 构建历史消息
-    history_msg: List[BaseMessage] = await _build_history_message(recent_msg)
-
-    # 检索相关记忆
-    documents = await chroma_util.search(
-        ChromaTypeConstant.CHAT,
-        msg_content,
-        {"user_id": user_id, "llm_id": llm_id})
-    total_memory = await _documents_format(documents)
-
-    # 调用 LLM
-    chain = await _build_chat_chain()
-    soul = await PromptManager.get_soul("soul")
-
-    logger.debug("api调用llm最后提示")
-    chat_response = await chain.ainvoke({
-        "soul": soul if soul else "",
-        "role_declaration": role_declaration,
-        "core_anchor": core_anchor_text,
-        "character_card": init_memory if init_memory else "",
-        "mes_example": character_card_examples,
-        "character_card_detail": character_card_detail if character_card_detail else "",
-        "call_convention": call_convention,
-        "user_profile_summary": user_profile_summary if user_profile_summary else "",
-        "memory_bank_summary": memory_bank_summary if memory_bank_summary else "",
-        "relevant_memories": total_memory,
-        "recent_chat": "",
-        "history_msg": history_msg,
-        "user_message": msg_content,
-    })
-
-    # 保存对话到 Redis
-    pip = redis_client.pipeline()
-    pip.lpush(recent_msg_key, json.dumps({"role": "human", "content": msg_content}))
-    pip.lpush(recent_msg_key, json.dumps({"role": "ai", "content": chat_response}))
-    pip.llen(recent_msg_key)
-
-    result = pip.execute()
-
-    # 触发后台任务：记忆总结（每6轮触发一次）
-    background_tasks.add_task(async_summary_msg, recent_msg_key, result[0], user_id, llm_id)
-    
-    # 解析返回（保留 action 标签）
-    clean_response = strip_think_only(chat_response)
-    
-    # 触发后台任务：情绪分类（使用纯文本，清理所有标签）
-    pure_text = strip_all_tags(chat_response)
-    background_tasks.add_task(classify_and_update_emotion, user_id, llm_id, pure_text)
-    
-    message_blocks = parse_action_tags(clean_response)
-
-    return message_blocks
-
-
-async def delete_msg(user_id: str, llm_id: str) -> None:
-    """删除对话相关的所有记忆"""
-    keys_to_delete = [
-        build_memory_key(LLMChatConstant.RAW_EXPERIENCE, user_id, llm_id),
-        build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id),
-        build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id),
-        build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id),
-        build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id),
-        build_memory_key(LLMChatConstant.INIT_MEMORY, user_id, llm_id),
-        build_memory_key(LLMChatConstant.RECENT_MSG, user_id, llm_id),
-        build_memory_key(LLMChatConstant.ROLE_EMOTION_STATE, user_id, llm_id),
-        build_memory_key(LLMChatConstant.ROLE_EMOTION_LOG, user_id, llm_id),
-    ]
-
-    pip = redis_client.pipeline()
-    for key in keys_to_delete:
-        pip.delete(key)
-    pip.execute()
-
-    await chroma_util.delete(ChromaTypeConstant.CHAT, user_id=user_id, llm_id=llm_id)
