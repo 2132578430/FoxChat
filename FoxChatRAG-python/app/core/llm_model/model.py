@@ -96,7 +96,7 @@ nomic_embed = OllamaEmbeddings(
 )
 
 json_ds_model = ChatOpenAI(
-    model="deepseek-chat",
+    model="deepseek-v4-flash",
     api_key=SecretStr(global_settings.key.ds_model),
     base_url="https://api.deepseek.com",
     model_kwargs={
@@ -107,9 +107,9 @@ json_ds_model = ChatOpenAI(
 )
 
 ds_model = ChatOpenAI(
-    model="deepseek-chat",
+    model="deepseek-v4-flash",
     api_key=SecretStr(global_settings.key.ds_model),
-    base_url="https://api.deepseek.com"
+    base_url="https://api.deepseek.com",
 )
 
 kimi_model = ChatOpenAI(

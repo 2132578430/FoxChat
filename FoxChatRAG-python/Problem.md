@@ -6,4 +6,6 @@
 ## 记忆过大
 由于没有好的记忆压缩方法，因此目前最大只能支持50轮对话，大了以后token就会指数级增长
 
-## 还是有记忆错乱的风险
+## 记忆初始化处理有问题
+记忆初始化出来只包含state，[memory_event_extractor.md](app/core/prompts/memory_event_extractor.md)
+此提示词中的事件完全没有提取出来
