@@ -19,8 +19,10 @@ from app.common.constant.FileTypeConstant import FileTypeConstant
 from app.common.constant.LLMChatConstant import LLMChatConstant, build_memory_key
 from app.core.db.redis_client import redis_client
 from app.core.llm_model import model as llm_model
+from app.core.prompts.prompt_manager import PromptManager
 from app.core.prompts.prompt_template import PromptTemplate
 from app.util import loader_util, chroma_util
+from app.util.template_util import escape_template
 from app.service.chat.user_profile_service import update_user_profile_in_summary
 
 MEMORY_BANK_MAX_SIZE = 50
@@ -53,9 +55,11 @@ async def _build_event_extractor_chain():
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
+    prompt_str = await PromptManager.get_prompt("memory_event_extractor.md")
+    prompt_str = escape_template(prompt_str, ["input_content"])
     template = ChatPromptTemplate([
-        ("system", PromptTemplate.MEMORY_EVENT_EXTRACTOR_PROMPT),
-        ("human", "{chat_history}")
+        ("system", prompt_str),
+        ("human", "{input_content}")
     ])
 
     str_parser = StrOutputParser()
@@ -71,7 +75,7 @@ async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
 
     chat_history = "\n".join(recent_msg_list)
     chain = await _build_event_extractor_chain()
-    result = await chain.ainvoke({"chat_history": chat_history})
+    result = await chain.ainvoke({"input_content": chat_history})
 
     try:
         events = json.loads(result)
@@ -184,7 +188,9 @@ async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: 
         return
 
     pip = redis_client.pipeline()
+    # 获取最老的几条消息
     pip.lrange(recent_msg_key, RECENT_MSG_KEEP_SIZE, -1)
+    # 保留最近的消息
     pip.ltrim(recent_msg_key, 0, RECENT_MSG_KEEP_SIZE - 1)
 
     result = pip.execute()
@@ -193,8 +199,10 @@ async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: 
 
     logger.debug(f"记忆总结触发: 原始 {recent_msg_size} 条, 保留 {RECENT_MSG_KEEP_SIZE} 条, 总结 {len(recent_msg_list)} 条")
 
-    await _summary_and_upload(recent_msg_list, user_id, llm_id)
+    # 上传向量数据库（暂时禁用）
+    # await _summary_and_upload(recent_msg_list, user_id, llm_id)
 
+    # 提取事件
     events = await _extract_memory_events(recent_msg_list)
     if events:
         await _append_to_memory_bank(events, user_id, llm_id)
