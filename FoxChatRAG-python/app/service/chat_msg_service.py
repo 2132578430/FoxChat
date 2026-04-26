@@ -46,6 +46,7 @@ class ChatMemories:
     core_anchor_json: str
     user_profile_json: str
     memory_bank_json: str
+    emotion_state_json: str
 
 
 @dataclass
@@ -57,6 +58,7 @@ class ParsedMemories:
     core_anchor_text: str
     user_profile_summary: str
     memory_bank_summary: str
+    emotion_state: str
 
 async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[MessageBlock]:
     """
@@ -87,7 +89,7 @@ async def chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) -> List[Me
     # 4. 调用 LLM
     recent_msg_key = _build_recent_msg_key(user_id, llm_id)
     chat_response = await _invoke_llm(
-        parsed, history_msg, memories.init_memory, msg_content
+        parsed, history_msg, memories.init_memory, msg_content, user_id, llm_id
     )
 
     # 5. 保存对话
@@ -138,6 +140,7 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
     pip.get(build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id))
     pip.get(build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id))
     pip.get(build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id))
+    pip.get(build_memory_key(LLMChatConstant.ROLE_EMOTION_STATE, user_id, llm_id))
 
     result = pip.execute()
 
@@ -148,6 +151,7 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
         core_anchor_json=result[3] or "",
         user_profile_json=result[4] or "",
         memory_bank_json=result[5] or "",
+        emotion_state_json=result[6] or "",
     )
 
 
@@ -157,6 +161,7 @@ def _parse_all_memories(memories: ChatMemories) -> ParsedMemories:
     role_declaration, core_anchor_text = _parse_core_anchor(memories.core_anchor_json)
     user_profile_summary = _parse_user_profile(memories.user_profile_json)
     memory_bank_summary = _parse_memory_bank(memories.memory_bank_json)
+    emotion_state = _parse_emotion_state(memories.emotion_state_json)
 
     return ParsedMemories(
         character_card_examples=character_card_examples,
@@ -165,6 +170,7 @@ def _parse_all_memories(memories: ChatMemories) -> ParsedMemories:
         core_anchor_text=core_anchor_text,
         user_profile_summary=user_profile_summary,
         memory_bank_summary=memory_bank_summary,
+        emotion_state=emotion_state,
     )
 
 
@@ -238,7 +244,7 @@ def _parse_user_profile(json_str: str) -> str:
 
 
 def _parse_memory_bank(json_str: str) -> str:
-    """解析 Memory Bank"""
+    """解析 Memory Bank，只取最近5条作为保底"""
     if not json_str:
         return ""
 
@@ -247,8 +253,11 @@ def _parse_memory_bank(json_str: str) -> str:
         if not isinstance(bank, list) or not bank:
             return ""
 
+        recent_items = bank[-5:] if len(bank) > 5 else bank
+        logger.info(f"Memory Bank: 共 {len(bank)} 条，注入最近 {len(recent_items)} 条")
+
         lines = []
-        for item in bank:
+        for item in recent_items:
             time_val = item.get("time", "某时")
             content_val = item.get("content", "")
             type_val = item.get("type", "event")
@@ -257,6 +266,49 @@ def _parse_memory_bank(json_str: str) -> str:
     except json.JSONDecodeError:
         logger.warning("memory_bank JSON解析失败")
         return ""
+
+
+def _parse_emotion_state(json_str: str) -> str:
+    """解析情绪状态"""
+    if not json_str:
+        return "当前情绪：平静（默认状态）"
+
+    try:
+        state = json.loads(json_str)
+        emotion = state.get("emotion", "neutral")
+        certainty = state.get("certainty", "确定")
+        last_trigger = state.get("last_trigger", "")
+        
+        emotion_map = {
+            "neutral": "平静",
+            "happy": "开心",
+            "sad": "难过",
+            "angry": "生气",
+            "surprised": "惊讶",
+            "fear": "害怕",
+            "disgust": "厌恶",
+            "anticipation": "期待",
+            "trust": "信任",
+            "love": "喜欢",
+            "joy": "喜悦",
+            "sadness": "悲伤",
+            "anger": "愤怒",
+            "fearful": "恐惧",
+            "disgusted": "厌恶",
+            "surprise": "惊讶",
+            "anticipating": "期待",
+            "trusting": "信任",
+            "loving": "爱",
+        }
+        
+        emotion_cn = emotion_map.get(emotion.lower(), emotion)
+        result = f"当前情绪：{emotion_cn}"
+        if last_trigger:
+            result += f"（最近触发：{last_trigger[:50]}）"
+        return result
+    except json.JSONDecodeError:
+        logger.warning("emotion_state JSON解析失败")
+        return "当前情绪：平静（默认状态）"
 
 
 # ==================== 私有函数 - LLM调用 ====================
@@ -281,11 +333,15 @@ async def _invoke_llm(
     parsed: ParsedMemories,
     history_msg: List[BaseMessage],
     init_memory: str,
-    msg_content: str
+    msg_content: str,
+    user_id: str,
+    llm_id: str
 ) -> str:
     """调用 LLM 生成回复"""
     chain = await _build_chat_chain()
     soul = await PromptManager.get_soul("soul")
+
+    relevant_memories = await _search_relevant_memories(msg_content, user_id, llm_id)
 
     logger.debug("api调用llm最后提示")
     return await chain.ainvoke({
@@ -298,16 +354,42 @@ async def _invoke_llm(
         "call_convention": "",
         "user_profile_summary": parsed.user_profile_summary,
         "memory_bank_summary": parsed.memory_bank_summary,
-        "relevant_memories": "",
+        "relevant_memories": relevant_memories,
+        "emotion_state": parsed.emotion_state,
         "recent_chat": "",
         "history_msg": history_msg,
         "user_message": msg_content,
     })
 
 
+async def _search_relevant_memories(msg_content: str, user_id: str, llm_id: str) -> str:
+    """检索相关记忆"""
+    try:
+        documents = await chroma_util.search(
+            ChromaTypeConstant.CHAT,
+            msg_content,
+            {"user_id": user_id, "llm_id": llm_id}
+        )
+        
+        if not documents:
+            return ""
+        
+        lines = []
+        for doc in documents[:3]:
+            content = doc.page_content.strip()
+            if content:
+                lines.append(f"- {content}")
+        
+        logger.info(f"检索到 {len(documents)} 条相关记忆，注入 {len(lines)} 条")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"检索相关记忆失败: {e}")
+        return ""
+
+
 def _print_template(template_value):
     """打印注入的模板变量（调试用）"""
-    logger.debug(f"注入消息：（省略）")
+    logger.debug(f"注入消息：\n{template_value}")
     return template_value
 
 

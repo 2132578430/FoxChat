@@ -29,7 +29,7 @@ MEMORY_BANK_MAX_SIZE = 50
 MEMORY_BANK_COMPRESS_TARGET = 30
 
 RECENT_MSG_KEEP_SIZE = 10
-SUMMARY_TRIGGER_THRESHOLD = 14
+SUMMARY_TRIGGER_THRESHOLD = 18
 
 
 async def _build_summary_chain():
@@ -199,8 +199,8 @@ async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: 
 
     logger.debug(f"记忆总结触发: 原始 {recent_msg_size} 条, 保留 {RECENT_MSG_KEEP_SIZE} 条, 总结 {len(recent_msg_list)} 条")
 
-    # 上传向量数据库（暂时禁用）
-    # await _summary_and_upload(recent_msg_list, user_id, llm_id)
+    # 上传向量数据库
+    await _summary_and_upload(recent_msg_list, user_id, llm_id)
 
     # 提取事件
     events = await _extract_memory_events(recent_msg_list)
