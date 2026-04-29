@@ -63,11 +63,16 @@ def _ensure_nodes_key_exists(user_id: str, llm_id: str) -> None:
     json_client = _get_json_client()
 
     try:
-        json_client.get(key)
-    except Exception:
-        # 不存在，初始化空数组
+        data = json_client.get(key)
+        # 检查返回值是否有效
+        if data is None or not isinstance(data, dict) or 'nodes' not in data:
+            # 不存在或结构不正确，初始化空数组
+            json_client.set(key, '$', {'nodes': []})
+            logger.debug(f"【时间节点初始化】已创建空数组: {key}")
+    except Exception as e:
+        # 异常情况，初始化空数组
         json_client.set(key, '$', {'nodes': []})
-        logger.debug(f"【时间节点初始化】已创建空数组: {key}")
+        logger.debug(f"【时间节点初始化】异常后重建: {key}, error: {e}")
 
 
 def create_time_node(
