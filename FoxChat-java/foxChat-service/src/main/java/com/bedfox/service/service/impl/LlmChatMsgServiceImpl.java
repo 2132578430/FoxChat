@@ -1,10 +1,13 @@
 package com.bedfox.service.service.impl;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.bedfox.common.util.TimeUtil;
 import com.bedfox.pojo.domain.LlmChatMsg;
+import com.bedfox.pojo.vo.LlmMsgHistoryVo;
 import com.bedfox.service.mapper.LlmChatMsgMapper;
 import com.bedfox.service.service.LlmChatMsgService;
 import jakarta.annotation.Resource;
+import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -23,8 +26,18 @@ public class LlmChatMsgServiceImpl extends ServiceImpl<LlmChatMsgMapper, LlmChat
     LlmChatMsgMapper llmChatMsgMapper;
 
     @Override
-    public List<LlmChatMsg> getMsgHistory(String userId, String llmId, LocalDateTime lastTime, Long lastId) {
-        return llmChatMsgMapper.getMsgHistory(userId, llmId, lastTime, lastId);
+    public List<LlmMsgHistoryVo> getMsgHistory(String userId, String llmId, Long lastTime, String lastId) {
+        LocalDateTime currentTime = TimeUtil.timestampToLdt(lastTime);
+
+        List<LlmChatMsg> llmChatMsgList = llmChatMsgMapper.getMsgHistory(userId, llmId, currentTime, lastId);
+
+        return llmChatMsgList.stream()
+                .map(llmChatMsg -> {
+                    LlmMsgHistoryVo chatMsgVo = new LlmMsgHistoryVo();
+                    BeanUtils.copyProperties(llmChatMsg, chatMsgVo);
+                    return chatMsgVo;
+                })
+                .toList();
     }
 }
 

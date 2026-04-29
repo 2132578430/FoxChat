@@ -5,8 +5,6 @@ import com.bedfox.pojo.domain.LlmUser;
 import com.bedfox.pojo.dto.AddLlmFriendDto;
 import com.bedfox.pojo.dto.LlmFriendUpdateDto;
 import com.bedfox.pojo.vo.FriendVo;
-import com.bedfox.pojo.vo.LlmChatMsgVo;
-import com.bedfox.pojo.vo.LlmMsgHistoryVo;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
@@ -29,15 +27,6 @@ public interface LlmUserService extends IService<LlmUser> {
 
     // 更新模型好友信息
     void updateFriend(LlmFriendUpdateDto updateDto);
-
-    // 模型聊天主逻辑
-    LlmChatMsgVo llmChat(String llmId, String msgContent);
-
-    //TODO: muti agent模式
-    LlmChatMsgVo llmSuperChat(String llmId, String msgContent);
-
-    // 获取模型好友聊天记录
-    List<LlmMsgHistoryVo> getMsgHistory(String llmId, Long lastTime, Long lastId);
 
     // 上传模型好友头像
     String uploadAvatar(MultipartFile file);

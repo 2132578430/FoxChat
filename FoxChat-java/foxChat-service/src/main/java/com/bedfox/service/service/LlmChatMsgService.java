@@ -2,8 +2,8 @@ package com.bedfox.service.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.bedfox.pojo.domain.LlmChatMsg;
+import com.bedfox.pojo.vo.LlmMsgHistoryVo;
 
-import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -13,5 +13,5 @@ import java.util.List;
 */
 public interface LlmChatMsgService extends IService<LlmChatMsg> {
 
-    List<LlmChatMsg> getMsgHistory(String userId, String llmId, LocalDateTime lastTime, Long lastId);
+    List<LlmMsgHistoryVo> getMsgHistory(String userId, String llmId, Long lastTime, String lastId);
 }
