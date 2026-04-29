@@ -1,3 +1,15 @@
+"""
+向量上传服务
+
+职责：
+- 接收文件上传请求
+- 下载文件到本地
+- 加载文件内容
+- LLM 总结文件内容
+- 上传到向量数据库
+- 更新数据库状态
+"""
+
 import asyncio
 import json
 import mimetypes
@@ -21,18 +33,19 @@ from app.util import loader_util, chroma_util
 
 
 async def _update_file_status(file_path: str, db: AsyncSession):
-        """
-        修改数据库文件状态为向量成功
-        """
-        sql = select(RagFile).where(RagFile.file_path == file_path)
+    """
+    修改数据库文件状态为向量成功
+    """
+    sql = select(RagFile).where(RagFile.file_path == file_path)
 
-        result = await db.execute(sql)
+    result = await db.execute(sql)
 
-        rag_file = result.scalars().first()
+    rag_file = result.scalars().first()
 
-        rag_file.status = 2
+    rag_file.status = 2
 
-        await db.commit()
+    await db.commit()
+
 
 async def _summary_file_content(documents: list[Document]) -> dict:
     str_parser = StrOutputParser()
@@ -51,11 +64,9 @@ async def _summary_file_content(documents: list[Document]) -> dict:
     return json.loads(res)
 
 
-
-
 async def upload_file(body, db: AsyncSession):
     """
-    # rag文件上传处理逻辑
+    rag文件上传处理逻辑
     :return:
     """
     body = body.decode('utf-8')
@@ -78,8 +89,8 @@ async def upload_file(body, db: AsyncSession):
             # 利用加载器加载成documents
             documents: list[Document] = await asyncio.to_thread(
                 loader_util.load_file,
-                    local_file_path,
-                    FileTypeConstant(file_type)
+                local_file_path,
+                FileTypeConstant(file_type)
             )
             logger.info("加载文件完成")
 
@@ -91,7 +102,7 @@ async def upload_file(body, db: AsyncSession):
 
             upload_document = Document(
                 page_content=f"关键词：{keywords}\n内容摘要:{summary}",
-                metadata = {
+                metadata={
                     "user_id": user_id,
                     "file_path": file_path,
                     "keywords": keywords,
@@ -100,10 +111,11 @@ async def upload_file(body, db: AsyncSession):
             )
 
             # 上传到向量库
-            await chroma_util.upload(ChromaTypeConstant.RAG,
-                                     [upload_document],
-                                     file_path,
-                                     )
+            await chroma_util.upload(
+                ChromaTypeConstant.RAG,
+                [upload_document],
+                file_path,
+            )
 
             # 修改数据库状态
             await _update_file_status(file_path, db)

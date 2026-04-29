@@ -1,3 +1,11 @@
+"""
+RAG 文件检索服务
+
+职责：
+- 根据用户消息检索相关文件
+- 向量相似度搜索
+- 文件路径归纳
+"""
 
 import os
 from collections import defaultdict
@@ -8,13 +16,14 @@ from app.chroma import rag_chroma
 from app.schemas.M import M
 from app.schemas.rag_search_file_msg import RagSearchFileMsg
 
+
 def search_file(msg: M[RagSearchFileMsg]):
     """
     文件搜索主逻辑
     :param msg:
     :return:
     """
-    search_data:RagSearchFileMsg = msg.data
+    search_data: RagSearchFileMsg = msg.data
     search_msg = search_data.msg
     user_id = search_data.userId
 
@@ -30,9 +39,10 @@ def search_file(msg: M[RagSearchFileMsg]):
 
     return file_path_group
 
+
 def file_group_path(docs_with_scores: list[tuple[Document, float]]):
     """
-    # 文档路径归纳
+    文档路径归纳
     :param docs_with_scores: 文档及其相似度分数的列表
     :return:
     """

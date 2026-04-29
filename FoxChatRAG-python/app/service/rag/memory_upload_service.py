@@ -1,3 +1,15 @@
+"""
+记忆上传服务
+
+职责：
+- 处理用户初始记忆上传
+- 并发生成多层记忆结构：
+  - 角色核心锚点
+  - 用户画像
+  - 角色卡
+  - 初始事件
+"""
+
 import asyncio
 import json
 from loguru import logger

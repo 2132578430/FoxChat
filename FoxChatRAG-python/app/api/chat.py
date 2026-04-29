@@ -4,7 +4,7 @@ from loguru import logger
 
 from app.schemas import ChatMsgTo
 from app.schemas.M import M
-from app.service import chat_msg_service
+from app.service.chat import process_chat_msg, clear_chat_memory
 from app.service import super_chat_service
 chat_router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -13,7 +13,7 @@ async def chat_msg(chat_msg_to: ChatMsgTo, background_tasks: BackgroundTasks, re
 
     logger.info(f"接收到消息：{chat_msg_to}")
 
-    result = await chat_msg_service.chat_msg(chat_msg_to, background_tasks)
+    result = await process_chat_msg(chat_msg_to, background_tasks)
 
     logger.info(f"收到回复：{result}")
 
@@ -41,4 +41,4 @@ async def chat_delete(
         user_id: str = Query(..., alias="userId"),
         llm_id: str = Query(..., alias="llmId")
 ):
-    await chat_msg_service.delete_msg(user_id, llm_id)
+    await clear_chat_memory(user_id, llm_id)

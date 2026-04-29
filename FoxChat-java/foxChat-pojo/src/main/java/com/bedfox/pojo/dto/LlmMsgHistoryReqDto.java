@@ -9,5 +9,5 @@ import lombok.Data;
 public class LlmMsgHistoryReqDto {
     private String llmId;
     private Long lastTime;
-    private Long lastId;
+    private String lastId;
 }

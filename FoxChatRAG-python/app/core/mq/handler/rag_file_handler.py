@@ -2,7 +2,7 @@ import aio_pika
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.service import upload_vector_service
+from app.service.rag import upload_file
 
 
 async def rag_file_handler(message, db: AsyncSession):
@@ -13,7 +13,7 @@ async def rag_file_handler(message, db: AsyncSession):
     try :
         # TODO:检查幂等性
 
-        await upload_vector_service.upload_file(message.body, db)
+        await upload_file(message.body, db)
         await message.ack()
     except Exception as e:
         logger.exception(f"rag文件处理错误")

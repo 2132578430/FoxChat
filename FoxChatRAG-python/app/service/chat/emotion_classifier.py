@@ -4,7 +4,7 @@
 职责：
 - 调用 LLM 分析模型回复的情绪状态
 - 返回情绪标签和确定性
-- 与 emotion_state 模块配合更新 Redis 状态
+- 与 current_state 模块配合更新 Redis 状态（阶段2升级）
 """
 
 import re
@@ -13,7 +13,8 @@ from langchain_core.prompts import PromptTemplate
 from loguru import logger
 
 from app.core.llm_model import get_emotion_model
-from app.core.emotion_state import update_emotion_state, log_emotion_change
+from app.service.chat.state_manager import update_current_state, get_current_state
+from app.schemas.current_state import UpdateSource
 from app.util.template_util import escape_template
 
 EMOTION_PROMPT_RAW = """分析角色回复的情绪状态，输出JSON格式结果。
@@ -122,22 +123,39 @@ def _parse_emotion_result(result_text: str) -> tuple[str, str]:
     return ("neutral", "不确定")
 
 
-async def classify_and_update_emotion(user_id: str, llm_id: str, model_reply: str) -> None:
+async def classify_and_update_emotion(
+    user_id: str,
+    llm_id: str,
+    model_reply: str,
+    current_round: int = 0,
+) -> None:
     """
     分析情绪并更新状态（供后台任务调用）
-    
+
     Args:
         user_id: 用户 ID
         llm_id: 模型 ID
         model_reply: 模型回复
+        current_round: 当前全局轮数
     """
     try:
         emotion, certainty = await classify_emotion(model_reply)
-        
-        action = "updated" if certainty == "确定" else "skipped"
-        
-        update_emotion_state(user_id, llm_id, emotion, certainty, model_reply)
-        log_emotion_change(user_id, llm_id, model_reply, emotion, certainty, action)
-        
+
+        # 阶段2：更新状态容器.情绪
+        if certainty == "确定":
+            update_current_state(
+                user_id=user_id,
+                llm_id=llm_id,
+                field_name="emotion",
+                new_value=emotion,
+                confidence=0.9,
+                source=UpdateSource.RUNTIME,
+                reason=f"情绪分类结果: {emotion}",
+                current_round=current_round,
+            )
+            logger.info(f"【情绪更新】emotion = {emotion}")
+        else:
+            logger.debug(f"【情绪保持】确定性不足，保持原状态")
+
     except Exception as e:
         logger.error(f"情绪分类后台任务失败: {e}")

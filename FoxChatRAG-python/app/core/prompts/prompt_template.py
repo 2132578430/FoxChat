@@ -24,8 +24,8 @@ class PromptTemplate(StrEnum):
     【用户画像】
     {user_profile_summary}
 
-    【当前情绪状态】
-    {emotion_state}
+    【当前状态】
+    {current_state}
 
     【记忆银行】
     {memory_bank_summary}
