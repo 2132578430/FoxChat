@@ -17,7 +17,7 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict, Optional
 
 from loguru import logger
 
@@ -28,10 +28,15 @@ from app.core.db.redis_client import redis_client
 from app.core.llm_model import model as llm_model
 from app.core.prompts.prompt_manager import PromptManager
 from app.core.prompts.prompt_template import PromptTemplate
-from app.service.chat.state_manager import get_current_state, get_rounds_passed, check_and_expire_fields, increment_round_counter
-from app.service.chat.time_node_service import check_and_activate_due_time_nodes
+from app.service.chat.state_manager import get_current_state, check_and_expire_fields, increment_round_counter, get_current_round, clean_expired_unfinished_items
+from app.service.chat.history_event_retrieval_service import (
+    should_trigger_history_retrieval,
+    retrieve_history_events_v2,
+    format_history_events,
+)
 from app.exception.BusinessException import BusinessException
 from app.schemas import ChatMsgTo, MessageBlock
+from app.schemas.current_state import CurrentState, ItemStatus
 from app.service.chat.memory_summary_service import async_summary_msg
 from app.service.chat.emotion_classifier import classify_and_update_emotion
 from app.service.chat.runtime_state_extractor import update_current_state_from_runtime
@@ -54,6 +59,7 @@ class ChatMemories:
     user_profile_json: str
     memory_bank_json: str
     current_state_json: str  # 阶段2：替代 emotion_state
+    a2_candidates_json: str = ""  # 阶段5：A2 硬边界候选
 
 
 @dataclass
@@ -86,26 +92,59 @@ async def process_chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) ->
     llm_id = msg.llmId
     msg_content = msg.msgContent
 
-    # 阶段2新增：检查到期的时间节点
-    activated_contents = check_and_activate_due_time_nodes(user_id, llm_id)
-    if activated_contents:
-        logger.info(f"【时间节点激活】{len(activated_contents)} 个到期节点")
+    from app.service.chat.state_manager import get_current_round, clean_expired_unfinished_items, update_unfinished_items
+    from app.service.chat.time_node_service import route_due_time_nodes
+    from app.schemas.current_state import UnfinishedItem, ItemStatus
 
-    # 1. 获取所有的记忆事件+人物卡+角色核心等等
+    # ========== 性能计时起点 ==========
+    current_round = get_current_round(user_id, llm_id)
+    clean_expired_unfinished_items(user_id, llm_id, current_round)
+
+    # 时间节点到期路由：扫描 pending nodes，到期的路由到 B 层或 C 层
+    routing = route_due_time_nodes(user_id, llm_id, current_round)
+    if routing["unfinished_items"]:
+        activated_items = [
+            UnfinishedItem(
+                content=item["content"],
+                status=ItemStatus.PENDING,
+                confidence=item.get("confidence", 0.9),
+                expire_rounds=item.get("expire_rounds", 6),
+                update_round=current_round,
+                update_reason="时间节点到期激活",
+                created_at=item.get("created_at"),
+                due_at=item.get("due_at"),
+            )
+            for item in routing["unfinished_items"]
+        ]
+        update_unfinished_items(user_id, llm_id, activated_items, current_round)
+        logger.info(f"【时间节点激活】B层: {len(activated_items)} 条事项写入 unfinished_items")
+    retrieval_triggers = routing.get("retrieval_triggers", [])
+    if retrieval_triggers:
+        logger.info(f"【时间节点路由】C层触发: {len(retrieval_triggers)} 条信号")
+
+    # 1. 获取所有的记忆事件+人物卡+角色核心等等（性能关键点：_fetch_all_memories）
     memories = await _fetch_all_memories(user_id, llm_id)
 
-    # 2. 解析记忆
-    rounds_passed = get_rounds_passed(user_id, llm_id)
-    parsed = _parse_all_memories(memories, rounds_passed)
+    # 2. 解析记忆（性能关键点：_parse_all_memories；阶段4：使用 current_round 用于 current_state 过期判断）
+    parsed = _parse_all_memories(memories, current_round=current_round)
 
-    # 3. 构建历史消息
+    # 3. 构建历史消息（性能关键点：_build_history_message）
     history_msg = await _build_history_message(memories.recent_msg)
 
-    # 4. 调用 LLM
+    # 4. 调用 LLM（性能关键点：_invoke_llm；任务 3.1：传入 current_state、recent_messages、retrieval_triggers）
     recent_msg_key = _build_recent_msg_key(user_id, llm_id)
     chat_response = await _invoke_llm(
-        parsed, history_msg, memories.init_memory, msg_content, user_id, llm_id
+        parsed,
+        history_msg,
+        memories.init_memory,
+        msg_content,
+        user_id,
+        llm_id,
+        memories.current_state_json,
+        memories.recent_msg,
+        retrieval_triggers,
     )
+    # ========== 性能计时终点 ==========
 
     # 5. 保存对话
     msg_count = await _save_chat_to_redis(
@@ -167,6 +206,7 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
     init_memory_key = _build_init_memory_key(user_id, llm_id)
     recent_msg_key = _build_recent_msg_key(user_id, llm_id)
     current_state_key = build_memory_key(LLMChatConstant.ROLE_CURRENT_STATE, user_id, llm_id)
+    a2_candidates_key = f"chat:memory:{user_id}:{llm_id}:a2_candidates"
 
     pip = redis_client.pipeline()
     pip.get(init_memory_key)
@@ -177,6 +217,8 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
     pip.get(build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id))
     # 阶段2：current_state 是 RedisJSON 类型，使用 JSON.GET 命令
     pip.execute_command('JSON.GET', current_state_key)
+    # 阶段5：A2 硬边界候选
+    pip.get(a2_candidates_key)
 
     result = pip.execute()
 
@@ -196,6 +238,7 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
         user_profile_json=result[4] or "",
         memory_bank_json=result[5] or "",
         current_state_json=current_state_json,
+        a2_candidates_json=result[7] or "",
     )
 
 
@@ -203,9 +246,10 @@ def _parse_all_memories(memories: ChatMemories, current_round: int = 0) -> Parse
     """解析所有记忆数据"""
     character_card_examples, character_card_detail = _parse_character_card(memories.character_card_json)
     role_declaration, core_anchor_text = _parse_core_anchor(memories.core_anchor_json)
-    user_profile_summary = _parse_user_profile(memories.user_profile_json)
+    user_profile_summary = _parse_user_profile(memories.user_profile_json, memories.a2_candidates_json)
     memory_bank_summary = _parse_memory_bank(memories.memory_bank_json)
     # 阶段2：使用 current_state 替代 emotion_state
+    # 阶段4：传入 current_round 用于过期判断
     current_state = _parse_current_state(memories.current_state_json, current_round)
 
     return ParsedMemories(
@@ -263,29 +307,148 @@ def _parse_core_anchor(text: str) -> tuple[str, str]:
     return role_declaration, core_anchor_text
 
 
-def _parse_user_profile(json_str: str) -> str:
-    """解析用户画像"""
-    if not json_str:
+def _build_static_anchors(
+    soul: str,
+    role_declaration: str,
+    core_anchor: str,
+    character_card: str,
+    character_card_detail: str,
+    mes_example: str,
+) -> str:
+    """
+    构建 A1 静态锚点块（阶段5新增）
+
+    按顺序拼接各子部分，非空部分带子标题，空部分跳过。
+
+    Args:
+        soul: 角色灵魂内容
+        role_declaration: 角色声明内容
+        core_anchor: 角色核心锚点内容
+        character_card: 角色详细卡内容
+        character_card_detail: 角色特征补充内容
+        mes_example: 示例对话风格内容
+
+    Returns:
+        拼接后的静态锚点字符串
+    """
+    sections = [
+        ("【角色灵魂（Soul）】", soul),
+        ("【角色声明】", role_declaration),
+        ("【角色核心锚点】", core_anchor),
+        ("【角色详细卡】", character_card),
+        ("【角色特征补充】", character_card_detail),
+        ("【示例对话风格】", mes_example),
+    ]
+
+    parts = []
+    for header, content in sections:
+        if content and content.strip():
+            parts.append(f"{header}\n{content.strip()}")
+
+    return "\n\n".join(parts) if parts else ""
+
+
+def _parse_a2_boundaries(a2_candidates_json: str) -> str:
+    """
+    解析 A2 硬边界候选（阶段5新增）
+
+    筛选 is_active=True 且 priority in {high, critical} 的条目，
+    按 priority 降序排列，格式化为列表。
+
+    Args:
+        a2_candidates_json: a2_candidates Redis key 的 JSON 内容
+
+    Returns:
+        格式化后的硬边界字符串，若无有效条目返回空字符串
+    """
+    if not a2_candidates_json:
         return ""
+
+    try:
+        candidates = json.loads(a2_candidates_json)
+        if not isinstance(candidates, list):
+            return ""
+
+        # 筛选 active 且 high/critical priority
+        valid = [
+            c for c in candidates
+            if c.get("is_active") and c.get("priority") in ("high", "critical")
+        ]
+
+        if not valid:
+            return ""
+
+        # 按 priority 降序：critical > high
+        priority_order = {"critical": 0, "high": 1}
+        valid.sort(key=lambda c: priority_order.get(c.get("priority"), 2))
+
+        # 格式化
+        lines = []
+        for c in valid:
+            category = c.get("category", "其他")
+            content = c.get("content", "")
+            if content:
+                lines.append(f"- [{category}] {content}")
+
+        return "\n".join(lines) if lines else ""
+
+    except json.JSONDecodeError:
+        return ""
+
+
+def _parse_user_profile(json_str: str, a2_candidates_json: str = "") -> str:
+    """解析用户画像（阶段5：追加 A2 硬边界）"""
+    # 先解析硬边界
+    boundaries = _parse_a2_boundaries(a2_candidates_json)
+
+    if not json_str:
+        return f"【硬边界】\n{boundaries}" if boundaries else ""
+
+    def _is_placeholder(value) -> bool:
+        if not value:
+            return True
+        if isinstance(value, str):
+            return value == "[未提及]"
+        if isinstance(value, list):
+            return all(_is_placeholder(item) for item in value)
+        if isinstance(value, dict):
+            return all(_is_placeholder(item) for item in value.values())
+        return False
+
+    def _format_value(value) -> str:
+        if isinstance(value, list):
+            return "、".join(str(item) for item in value if not _is_placeholder(item))
+        return str(value)
 
     try:
         profile = json.loads(json_str)
         parts = []
         for dim_key, dim_val in profile.items():
             if isinstance(dim_val, dict):
-                items = [f"{k}：{v}" for k, v in dim_val.items() if v and v != "[未提及]"]
+                items = [
+                    f"{k}：{_format_value(v)}"
+                    for k, v in dim_val.items()
+                    if not _is_placeholder(v)
+                ]
                 if items:
                     parts.append(f"{dim_key}：{', '.join(items)}")
             elif isinstance(dim_val, list):
-                filtered = [v for v in dim_val if v and v != "[未提及]"]
+                filtered = [_format_value(v) for v in dim_val if not _is_placeholder(v)]
                 if filtered:
                     parts.append(f"{dim_key}：{', '.join(filtered)}")
-            elif dim_val and dim_val != "[未提及]":
+            elif not _is_placeholder(dim_val):
                 parts.append(f"{dim_key}：{dim_val}")
-        return "\n".join(parts) if parts else ""
+
+        profile_content = "\n".join(parts) if parts else ""
+
+        # 硬边界在顶部，用户画像在后
+        if boundaries:
+            return f"【硬边界】\n{boundaries}\n\n{profile_content}"
+        return profile_content
+
     except json.JSONDecodeError:
         logger.warning("user_profile JSON解析失败")
-        return ""
+        return f"【硬边界】\n{boundaries}" if boundaries else ""
 
 
 def _parse_memory_bank(json_str: str) -> str:
@@ -329,6 +492,8 @@ def _parse_current_state(json_str: str, current_round: int = 0) -> str:
 
     try:
         from app.schemas.current_state import CurrentState
+        from datetime import datetime
+
         state = CurrentState.model_validate_json(json_str)
 
         # 获取有效字段
@@ -337,22 +502,55 @@ def _parse_current_state(json_str: str, current_round: int = 0) -> str:
         if not valid_fields:
             return ""  # 无有效字段，返回空字符串
 
-        # 构建摘要
-        lines = ["【当前状态】"]
+        # 构建摘要（先做 B 层内部去重，再构建 lines）
+        lines = []
 
+        # 情绪和关系状态（不受去重影响）
         if "情绪" in valid_fields:
-            lines.append(f"- 情绪：{valid_fields['情绪']}")
+            lines.append(f"- 情绪：{_map_emotion_to_cn(valid_fields['情绪'])}")
 
         if "关系状态" in valid_fields:
             lines.append(f"- 关系：{valid_fields['关系状态']}")
 
-        if "当前焦点" in valid_fields:
+        # B层内部去重：先判断 current_focus 与 unfinished_items 是否重复
+        valid_items = [
+            item for item in state.unfinished_items
+            if item.is_valid_for_injection(current_round)
+        ]
+
+        current_focus_value = valid_fields.get("当前焦点", "")
+        should_inject_focus = True  # 默认注入 current_focus
+
+        if valid_items and current_focus_value:
+            focus_keywords = set(current_focus_value.split())
+            for item in valid_items:
+                item_keywords = set(item.content.split())
+                overlap = len(focus_keywords & item_keywords) / max(len(focus_keywords), 1) if focus_keywords else 0
+                if overlap >= 0.5:  # 50%以上重叠
+                    # 优先保留 unfinished_items，跳过 current_focus
+                    logger.debug(f"【B层内部去重】current_focus '{current_focus_value}' 与 unfinished_item '{item.content[:30]}...' 重叠，优先保留 unfinished")
+                    should_inject_focus = False
+                    break
+
+        # 添加 current_focus（如果未被抑制）
+        if should_inject_focus and "当前焦点" in valid_fields:
             lines.append(f"- 焦点：{valid_fields['当前焦点']}")
 
-        if "未完成事项" in valid_fields:
-            # 最多注入2条
-            for item in valid_fields["未完成事项"][:2]:
-                lines.append(f"- 未完成：{item}")
+        # 阶段5：未完成事项增加完整时间上下文
+        if valid_items:
+            today = datetime.now().strftime("%Y-%m-%d")
+            for item in valid_items[:2]:  # 最多注入2条
+                # 拼接完整时间上下文
+                if item.created_at and item.due_at:
+                    # 提取日期部分
+                    created_date = item.created_at[:10] if len(item.created_at) >= 10 else item.created_at
+                    due_date = item.due_at[:10] if len(item.due_at) >= 10 else item.due_at
+
+                    # 完整时间上下文注入
+                    lines.append(f"- 未完成：[{created_date}录入] {item.content} [预期{due_date}/今天{today}]")
+                else:
+                    # 兼容旧数据：没有时间字段时只显示原文
+                    lines.append(f"- 未完成：{item.content}")
 
         if "互动方式" in valid_fields:
             lines.append(f"- 互动方式：{valid_fields['互动方式']}")
@@ -365,8 +563,8 @@ def _parse_current_state(json_str: str, current_round: int = 0) -> str:
 
 
 def _build_default_state_summary() -> str:
-    """构建默认状态摘要"""
-    return "【当前状态】\n- 情绪：平静\n- 关系：中性\n- 互动方式：闲聊"
+    """构建默认状态摘要（阶段6：空块省略，返回空字符串）"""
+    return ""  # 无有效状态时不注入默认值
 
 
 def _map_emotion_to_cn(emotion: str) -> str:
@@ -417,40 +615,157 @@ async def _invoke_llm(
     init_memory: str,
     msg_content: str,
     user_id: str,
-    llm_id: str
+    llm_id: str,
+    current_state_json: str,
+    recent_messages: List[str] = None,
+    retrieval_triggers: List[Dict] = None
 ) -> str:
     """调用 LLM 生成回复"""
+    from app.service.chat.prompt_payload_builder import build_prompt_payload, payload_to_invoke_dict
+
+    # 性能关键点：_build_chat_chain
     chain = await _build_chat_chain()
+
+    # 性能关键点：get_soul
     soul = await PromptManager.get_soul("soul")
 
-    relevant_memories = await _search_relevant_memories(msg_content, user_id, llm_id)
+    # 阶段4：结构化 history-event 优先，CHAT summary 兜底（任务 3.1）
+    # 阶段5修复：传递原始JSON而非解析后的摘要，用于提取current_focus和unfinished_items
+    # 性能关键点：_search_relevant_memories
+    relevant_memories = await _search_relevant_memories(
+        msg_content, user_id, llm_id, current_state_json, recent_messages, retrieval_triggers
+    )
+
+    # 阶段5：构建历史上下文（relevant_memories 优先，memory_bank 保底）
+    historical_context = relevant_memories if relevant_memories else parsed.memory_bank_summary
+
+    # 阶段5：构建静态锚点块（A1 层）
+    static_anchors = _build_static_anchors(
+        soul=soul or "",
+        role_declaration=parsed.role_declaration,
+        core_anchor=parsed.core_anchor_text,
+        character_card=init_memory,
+        character_card_detail=parsed.character_card_detail,
+        mes_example=parsed.character_card_examples,
+    )
+
+    # 阶段6：使用统一 payload builder
+    payload = build_prompt_payload(
+        static_anchors=static_anchors,
+        user_profile_summary=parsed.user_profile_summary,
+        historical_context=historical_context,
+        current_state=parsed.current_state,
+        history_msg=history_msg,
+        user_message=msg_content,
+        recent_messages=recent_messages,
+        enable_dedup=True,
+        enable_conflict_priority=True,
+    )
+
+    # 记录 payload 元信息
+    logger.info(f"【Payload】注入: {payload.blocks_injected}, 空块省略: {payload.blocks_omitted}")
+    if payload.duplicates_removed:
+        logger.info(f"【Payload去重】移除: {payload.duplicates_removed}")
 
     logger.debug("api调用llm最后提示")
-    return await chain.ainvoke({
-        "soul": soul or "",
-        "role_declaration": parsed.role_declaration,
-        "core_anchor": parsed.core_anchor_text,
-        "character_card": init_memory,
-        "mes_example": parsed.character_card_examples,
-        "character_card_detail": parsed.character_card_detail,
-        "call_convention": "",
-        "user_profile_summary": parsed.user_profile_summary,
-        "memory_bank_summary": parsed.memory_bank_summary,
-        "relevant_memories": relevant_memories,
-        "current_state": parsed.current_state,  # 阶段2：替代 emotion_state
-        "recent_chat": "",
-        "history_msg": history_msg,
-        "user_message": msg_content,
-    })
+    return await chain.ainvoke(payload_to_invoke_dict(payload))
 
 
-async def _search_relevant_memories(msg_content: str, user_id: str, llm_id: str) -> str:
-    """检索相关记忆"""
+async def _search_relevant_memories(
+    msg_content: str,
+    user_id: str,
+    llm_id: str,
+    current_state_str: str,
+    recent_messages: Optional[List[str]] = None,
+    retrieval_triggers: Optional[List[Dict]] = None,
+) -> str:
+    """
+    检索相关记忆（阶段4：结构化 history-event 优先，CHAT summary 兜底）
+
+    任务 3.1：切换为结构化事件检索，保持 Prompt 字段契约不变。
+
+    Args:
+        msg_content: 用户输入
+        user_id: 用户 ID
+        llm_id: 模型 ID
+        current_state_str: current_state JSON 字符串（用于提取 current_focus、unfinished_items）
+        recent_messages: 最近窗口消息列表（用于去重）
+        retrieval_triggers: time node 检索触发信号
+
+    Returns:
+        格式化后的 relevant_memories 文本块
+    """
     try:
+        # 解析 current_state 提取触发条件（性能关键点）
+        current_focus = None
+        unfinished_items_list = None
+
+        if current_state_str:
+            try:
+                # 兼容性处理：尝试解析 current_state
+                state = CurrentState.model_validate_json(current_state_str)
+                # 提取当前焦点（如果有效）
+                if state.current_focus.value and state.current_focus.confidence >= 0.6:
+                    current_focus = state.current_focus.value
+                # 提取未完成事项（如果有效）
+                unfinished_items_list = [
+                    item.content for item in state.unfinished_items
+                    if item.status == ItemStatus.PENDING  # 阶段5：使用枚举值比较
+                ]
+            except Exception as e:
+                # 阶段5兼容性增强：解析失败时尝试旧格式或忽略
+                logger.debug(f"解析 current_state 失败（将使用空值）: {e}")
+                # 尝试解析为旧格式（unfinished_items 可能是字符串列表）
+                try:
+                    import json
+                    raw_state = json.loads(current_state_str)
+                    if "unfinished_items" in raw_state:
+                        # 兼容旧格式：可能是字符串列表或对象列表
+                        items = raw_state["unfinished_items"]
+                        unfinished_items_list = []
+                        for item in items:
+                            if isinstance(item, str):
+                                unfinished_items_list.append(item)
+                            elif isinstance(item, dict) and "content" in item:
+                                unfinished_items_list.append(item["content"])
+                except Exception as e2:
+                    logger.debug(f"旧格式兼容解析也失败: {e2}")
+                    # 最终兜底：使用空列表
+                    unfinished_items_list = []
+
+        # 判断是否触发历史检索（性能关键点：should_trigger_history_retrieval；任务 2.2）
+        should_trigger = should_trigger_history_retrieval(
+            user_input=msg_content,
+            current_focus=current_focus,
+            unfinished_items=unfinished_items_list,
+            retrieval_triggers=retrieval_triggers,
+        )
+
+        if should_trigger:
+            # 触发检索：使用 V2 混合检索（性能关键点：retrieve_history_events_v2；BM25 + 向量 + Rerank）
+            events = await retrieve_history_events_v2(
+                query=msg_content,
+                user_id=user_id,
+                llm_id=llm_id,
+                max_results=4,
+                recent_messages=recent_messages,
+                enable_rerank=True,
+            )
+
+            if events:
+                # 格式化为稳定短文本块（任务 2.5）
+                formatted = format_history_events(events)
+                logger.info(f"【历史事件检索】触发成功，返回 {len(events)} 条结构化事件")
+                return formatted
+            else:
+                logger.info("【历史事件检索】触发但无结果，fallback 到 summary 检索")
+
+        # 未触发或无结构化结果：fallback 到 Chroma summary 检索（性能关键点：chroma_util.search；任务 3.3）
+        # V2隔离：明确过滤 is_event: False，排除事件污染
         documents = await chroma_util.search(
             ChromaTypeConstant.CHAT,
             msg_content,
-            {"user_id": user_id, "llm_id": llm_id}
+            {"user_id": user_id, "llm_id": llm_id, "is_event": False}  # V2: 隔离事件
         )
 
         if not documents:
@@ -462,8 +777,9 @@ async def _search_relevant_memories(msg_content: str, user_id: str, llm_id: str)
             if content:
                 lines.append(f"- {content}")
 
-        logger.info(f"检索到 {len(documents)} 条相关记忆，注入 {len(lines)} 条")
+        logger.info(f"【Summary 检索】fallback 成功，返回 {len(lines)} 条相关记忆")
         return "\n".join(lines)
+
     except Exception as e:
         logger.warning(f"检索相关记忆失败: {e}")
         return ""

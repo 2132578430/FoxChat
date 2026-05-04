@@ -9,3 +9,10 @@
 ## 记忆初始化处理有问题
 记忆初始化出来只包含state，[memory_event_extractor.md](app/core/prompts/memory_event_extractor.md)
 此提示词中的事件完全没有提取出来
+
+## user_profile的分流有问题
+现在A2层是关键词总结，但是不能让关键词主导
+
+## 时间节点time_nodes有问题
+现在时间节点提前添加会直接导致模型聚焦于未完成事件，甚至强提示词都无法唤醒，所以只能换为过期后提示
+后期需要专门搞一个小模型

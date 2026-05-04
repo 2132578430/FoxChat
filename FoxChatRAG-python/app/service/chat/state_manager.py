@@ -336,6 +336,54 @@ def update_unfinished_items_atomic(
     logger.info(f"【事项更新】unfinished_items: {len(items_list)} 条")
 
 
+def _is_same_event(existing: UnfinishedItem, new_item: UnfinishedItem) -> bool:
+    """
+    判断是否为同一事件（结构化去重）
+
+    规则：
+    1. time_expression 相同 AND keywords 重叠 → 同一事件
+    2. time_expression 相同 AND 一方 keywords 出现在另一方 content 中 → 同一事件
+    3. 都无结构化字段 → 回退到 content 包含关系
+
+    Args:
+        existing: 已存在的事项
+        new_item: 新事项
+
+    Returns:
+        是否为同一事件
+    """
+    # 结构化字段去重
+    if existing.time_expression and new_item.time_expression:
+        has_same_time = existing.time_expression == new_item.time_expression
+
+        if not has_same_time:
+            return False  # 时间不同，不是同一事件
+
+        # 情况1：双方都有 keywords，直接比较
+        if existing.keywords and new_item.keywords:
+            overlap = set(existing.keywords) & set(new_item.keywords)
+            if len(overlap) >= 1:
+                return True
+
+        # 情况2：一方有 keywords，检查是否出现在另一方 content 中
+        if existing.keywords:
+            if any(kw in new_item.content for kw in existing.keywords):
+                return True
+        if new_item.keywords:
+            if any(kw in existing.content for kw in new_item.keywords):
+                return True
+
+        # 时间相同但无法确认为同一事件，继续检查 content
+        # 但不直接 return False，因为可能有旧数据需要兼容
+
+    # 兜底：content 文本包含关系（兼容旧数据）
+    if existing.content and new_item.content:
+        return (new_item.content in existing.content or
+                existing.content in new_item.content)
+
+    return False
+
+
 def update_unfinished_items(
     user_id: str,
     llm_id: str,
@@ -354,29 +402,50 @@ def update_unfinished_items(
     # 1. 读取现有事项
     state = get_current_state(user_id, llm_id, current_round)
 
-    # 2. 合并规则：按 content 语义去重
-    existing_contents = {item.content for item in state.unfinished_items}
-
     merged_items = list(state.unfinished_items)
 
+    # 2. 合并规则：结构化去重（time_expression + keywords）
     for new_item in items:
-        if new_item.content not in existing_contents:
+        is_duplicate = False
+        for existing in merged_items:
+            if _is_same_event(existing, new_item):
+                is_duplicate = True
+                # 用信息更丰富的替换（content 更长的）
+                if len(new_item.content) > len(existing.content):
+                    existing.content = new_item.content
+                # 更新时间字段（如果有新信息）
+                if new_item.due_at and not existing.due_at:
+                    existing.due_at = new_item.due_at
+                if new_item.time_expression and not existing.time_expression:
+                    existing.time_expression = new_item.time_expression
+                if new_item.keywords and not existing.keywords:
+                    existing.keywords = new_item.keywords
+                break
+
+        if not is_duplicate:
             # 新事项写入当前轮数作为更新轮数
             new_item.update_round = current_round
             merged_items.append(new_item)
-            existing_contents.add(new_item.content)
-        else:
-            # 已存在，更新状态
-            for existing in merged_items:
-                if existing.content == new_item.content:
-                    if new_item.status != existing.status:
-                        existing.status = new_item.status
-                    break
 
     # 3. 清理已完成/过期事项
+    from datetime import datetime
+
+    def _is_absolutely_expired(item: UnfinishedItem) -> bool:
+        """判断是否绝对时间过期（due_at过期超过7天）"""
+        if not item.due_at:
+            return False
+        try:
+            due_date = datetime.fromisoformat(item.due_at.replace("Z", "+00:00"))
+            days_passed = (datetime.now() - due_date).days
+            return days_passed > 7  # 超过预期时间7天，清理掉
+        except Exception:
+            return False
+
     merged_items = [
         item for item in merged_items
-        if item.status == ItemStatus.PENDING and not item.is_expired(current_round)
+        if item.status == ItemStatus.PENDING
+        and not item.is_expired(current_round)
+        and not _is_absolutely_expired(item)  # 阶段5：绝对时间过期清理
     ]
 
     # 4. 最多保留5条
@@ -385,6 +454,58 @@ def update_unfinished_items(
     # 5. 原子更新
     items_list = [item.model_dump() for item in merged_items]
     update_unfinished_items_atomic(user_id, llm_id, items_list)
+
+
+def clean_expired_unfinished_items(user_id: str, llm_id: str, current_round: int = 0) -> int:
+    """
+    清理过期未完成事项（阶段5新增）
+
+    在每次对话开始时调用，清理：
+    1. 轮数过期的事项（expire_rounds机制）
+    2. 绝对时间过期的事项（due_at过期超过7天）
+
+    Args:
+        user_id: 用户 ID
+        llm_id: 模型 ID
+        current_round: 当前全局轮数
+
+    Returns:
+        清理的事项数量
+    """
+    from datetime import datetime
+
+    state = get_current_state(user_id, llm_id, current_round)
+
+    def _is_absolutely_expired(item: UnfinishedItem) -> bool:
+        """判断是否绝对时间过期"""
+        if not item.due_at:
+            return False
+        try:
+            due_date = datetime.fromisoformat(item.due_at.replace("Z", "+00:00"))
+            days_passed = (datetime.now() - due_date).days
+            return days_passed > 7
+        except Exception:
+            return False
+
+    original_count = len(state.unfinished_items)
+
+    # 清理过期事项
+    valid_items = [
+        item for item in state.unfinished_items
+        if item.status == ItemStatus.PENDING
+        and not item.is_expired(current_round)
+        and not _is_absolutely_expired(item)
+    ]
+
+    cleaned_count = original_count - len(valid_items)
+
+    if cleaned_count > 0:
+        # 原子更新清理后的列表
+        items_list = [item.model_dump() for item in valid_items[:5]]
+        update_unfinished_items_atomic(user_id, llm_id, items_list)
+        logger.info(f"【过期清理】清理 {cleaned_count} 条过期未完成事项")
+
+    return cleaned_count
 
 
 def _apply_state_overwrite_rules(

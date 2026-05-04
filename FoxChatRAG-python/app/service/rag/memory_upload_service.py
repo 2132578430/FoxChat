@@ -12,6 +12,7 @@
 
 import asyncio
 import json
+import re
 from loguru import logger
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -21,6 +22,22 @@ from app.core import redis_client
 from app.core.llm_model.model import LLM_MAP
 from app.core.prompts.prompt_manager import PromptManager
 from app.util.template_util import escape_template
+
+
+def _extract_json_array_text(raw_text: str) -> str:
+    """从模型输出中提取 JSON 数组文本。"""
+    if not raw_text:
+        return ""
+
+    text = raw_text.strip()
+    text = re.sub(r"```(?:json)?", "", text)
+    text = text.replace("```", "").strip()
+
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return text
+    return text[start:end + 1]
 
 
 async def _call_llm(prompt_template: str, variables: dict, model_name: str = "ds_model") -> str:
@@ -74,7 +91,7 @@ async def _extract_initial_events(experience: str) -> list:
     """
     result = await _call_llm("memory_event_extractor.md", {"input_content": experience}, "json_ds_model")
     try:
-        return json.loads(result)
+        return json.loads(_extract_json_array_text(result))
     except json.JSONDecodeError as e:
         logger.error(f"初始事件 JSON 解析失败: {e}, 原始输出: {result}")
         return []

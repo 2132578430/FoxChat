@@ -67,11 +67,16 @@ class StateField(BaseModel):
 class UnfinishedItem(BaseModel):
     """未完成事项结构"""
     content: str = Field(description="事项内容")
+    created_at: Optional[str] = Field(default=None, description="事项创建时间（ISO datetime）")
+    due_at: Optional[str] = Field(default=None, description="预期完成时间（ISO datetime）")
     status: ItemStatus = Field(default=ItemStatus.PENDING, description="事项状态")
     confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="置信度")
     expire_rounds: int = Field(default=6, description="相对过期轮数")
     update_round: int = Field(default=0, description="创建时的全局轮数")
     update_reason: str = Field(default="", description="更新原因")
+    # 结构化去重字段
+    time_expression: Optional[str] = Field(default=None, description="原始时间表达，如'明天'、'后天'")
+    keywords: List[str] = Field(default_factory=list, description="事件关键词，如['约会']、['考试']")
 
     def is_expired(self, current_round: int) -> bool:
         """判断是否已过期"""

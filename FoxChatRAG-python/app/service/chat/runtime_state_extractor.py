@@ -4,12 +4,14 @@
 职责：
 - 从用户输入中提取 current_focus（当前话题焦点）
 - 从 AI 回复中提取 unfinished_items（承诺事项）
-- 从对话中检测并创建 time_node（时间节点）
-- 组合以上来源，统一更新 current_state
 
 阶段2第一版范围：
 - 使用简单规则提取，不依赖 LLM
 - 关键词匹配 + 模式检测
+
+阶段4一致性修复：
+- 时间表达处理统一使用实时注入方案（直接写入 unfinished_items）
+- 与 memory_summary_service 保持一致
 """
 
 import re
@@ -17,8 +19,12 @@ from typing import List, Optional
 
 from loguru import logger
 
-from app.service.chat.state_manager import get_current_state, update_current_state, update_unfinished_items
-from app.service.chat.time_node_service import extract_time_node_from_text
+from app.service.chat.state_manager import get_current_state, update_current_state
+from app.service.chat.time_node_service import (
+    TIME_EXPRESSIONS,
+    write_unfinished_item_from_time_expression,
+    _extract_event_keywords,
+)
 from app.schemas.current_state import UnfinishedItem, ItemStatus, UpdateSource
 
 
@@ -57,11 +63,7 @@ def extract_current_focus(user_input: str, previous_focus: str = "") -> Optional
     # 检测话题关键词
     for keyword in FOCUS_KEYWORDS:
         if keyword in user_input:
-            # 尝试提取完整短语
-            # 简化版：直接返回关键词
-            focus = keyword
-            if len(focus) >= 4 and len(focus) <= 12:
-                return focus
+            return keyword
 
     # 无法提取
     return None
@@ -146,33 +148,35 @@ def update_current_state_from_runtime(
         )
         logger.info(f"【焦点更新】current_focus = {new_focus}")
 
-    # 2. 提取 unfinished_items
-    new_items = extract_unfinished_items_from_ai_reply(ai_reply)
-    if new_items:
-        update_unfinished_items(user_id, llm_id, new_items, current_round)
-        logger.info(f"【事项添加】{len(new_items)} 条承诺事项")
+    # 2. 提取 unfinished_items（AI回复提取暂时关闭）
+    # new_items = extract_unfinished_items_from_ai_reply(ai_reply)
+    # if new_items:
+    #     update_unfinished_items(user_id, llm_id, new_items, current_round)
+    #     logger.info(f"【事项添加】{len(new_items)} 条承诺事项")
 
-    # 3. 尝试创建 time_node
-    # 从用户输入检测
-    user_time_node = extract_time_node_from_text(
-        user_id=user_id,
-        llm_id=llm_id,
-        text=user_input,
-        is_ai_reply=False,
-        source_round=current_round,
-    )
+    # 3. 从用户输入检测时间表达，实时注入 unfinished_items（与 summary 一致）
+    time_expression = None
+    for keyword in TIME_EXPRESSIONS.keys():
+        if keyword in user_input:
+            time_expression = keyword
+            break
 
-    # 从 AI 回复检测
-    ai_time_node = extract_time_node_from_text(
-        user_id=user_id,
-        llm_id=llm_id,
-        text=ai_reply,
-        is_ai_reply=True,
-        source_round=current_round,
-    )
+    if time_expression:
+        content = user_input[:50] if len(user_input) > 50 else user_input
+        # 提取事件关键词（用于结构化去重）
+        keywords = _extract_event_keywords(user_input, time_expression)
 
-    if user_time_node or ai_time_node:
-        logger.info(f"【时间节点】已创建: user={user_time_node is not None}, ai={ai_time_node is not None}")
+        # 实时注入方案：直接写入 unfinished_items
+        written = write_unfinished_item_from_time_expression(
+            user_id=user_id,
+            llm_id=llm_id,
+            content=content,
+            time_expression=time_expression,
+            source_round=current_round,
+            keywords=keywords,
+        )
+        if written:
+            logger.info(f"【实时注入】时间表达写入: {time_expression}, content={content[:30]}...")
 
 
 # 用于导入的简化别名

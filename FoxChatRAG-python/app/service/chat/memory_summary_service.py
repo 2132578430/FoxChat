@@ -14,6 +14,7 @@
 """
 
 import json
+import re
 from datetime import datetime
 from typing import List
 
@@ -37,6 +38,31 @@ MEMORY_BANK_COMPRESS_TARGET = 30
 
 RECENT_MSG_KEEP_SIZE = 10
 SUMMARY_TRIGGER_THRESHOLD = 18
+
+
+def _extract_json_array_text(raw_text: str) -> str:
+    """从模型输出中提取 JSON 数组文本。"""
+    if not raw_text:
+        return ""
+
+    text = raw_text.strip()
+    text = re.sub(r"```(?:json)?", "", text)
+    text = text.replace("```", "").strip()
+
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return text
+    return text[start:end + 1]
+
+
+def _load_event_list(raw_text: str) -> List[dict]:
+    """解析事件列表，兼容模型输出包裹文本。"""
+    json_text = _extract_json_array_text(raw_text)
+    events = json.loads(json_text)
+    if not isinstance(events, list):
+        raise json.JSONDecodeError("event payload is not a list", json_text, 0)
+    return events
 
 
 async def _build_summary_chain():
@@ -85,7 +111,7 @@ async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
     result = await chain.ainvoke({"input_content": chat_history})
 
     try:
-        events = json.loads(result)
+        events = _load_event_list(result)
         current_time = datetime.now().strftime("%Y-%m-%d")
         for event in events:
             if "time" not in event or not event["time"]:
@@ -96,8 +122,8 @@ async def _extract_memory_events(recent_msg_list: List[str]) -> List[dict]:
             if "keywords" not in event:
                 event["keywords"] = []
         return events
-    except json.JSONDecodeError:
-        logger.warning(f"事件提取 JSON 解析失败: {result}")
+    except json.JSONDecodeError as e:
+        logger.warning(f"事件提取 JSON 解析失败: {e}; 原始输出: {result}")
         return []
 
 
@@ -318,33 +344,24 @@ async def _process_time_node_candidates(
     user_id: str,
     llm_id: str,
 ) -> None:
-    """处理时间节点候选"""
-    from app.service.chat.time_node_service import create_time_node
-    from app.schemas.time_node import CreatedFrom
+    """处理时间节点候选（实时注入方案：直接写入 unfinished_items）"""
+    from app.service.chat.time_node_service import write_unfinished_item_from_time_expression
 
     for candidate in candidates:
         if not candidate.is_valid_time:
             continue
 
-        # 映射 created_from
-        created_from_map = {
-            "user_future_event": CreatedFrom.USER_FUTURE_EVENT,
-            "user_future_followup": CreatedFrom.USER_FUTURE_FOLLOWUP,
-            "ai_commitment": CreatedFrom.AI_COMMITMENT,
-        }
-        created_from = created_from_map.get(candidate.created_from, CreatedFrom.USER_FUTURE_EVENT)
-
-        node = create_time_node(
+        # 直接写入 unfinished_items
+        written = write_unfinished_item_from_time_expression(
             user_id=user_id,
             llm_id=llm_id,
             content=candidate.content,
             time_expression=candidate.time_expression,
-            created_from=created_from,
             source_round=candidate.source_round,
         )
 
-        if node:
-            logger.info(f"【时间节点创建】{candidate.time_expression}: {candidate.content[:30]}...")
+        if written:
+            logger.info(f"【实时注入】时间表达写入: {candidate.time_expression}: {candidate.content[:30]}...")
 
 
 async def _process_history_event_candidates(
@@ -360,18 +377,23 @@ async def _process_history_event_candidates(
     if not events:
         return
 
-    # 转换为兼容格式
+    # 转换为兼容格式（阶段4：保留检索就绪字段）
     compatible_events = []
     for event in events:
         compatible_events.append({
+            "event_id": event.event_id,
             "time": event.occurred_at,
+            "occurred_at": event.occurred_at,
+            "last_seen_at": event.last_seen_at,
             "type": event.type.value,
             "actor": event.actor.value,
             "event_type": event.event_type.value,
             "content": event.content,
             "keywords": event.keywords,
             "importance": event.importance,
-            "event_id": event.event_id,
+            "source_snippet": event.source_snippet,
+            "source_round": event.source_round,
+            "activity_score": event.activity_score,
         })
 
     # 去重后追加
@@ -408,6 +430,7 @@ async def _deduplicate_and_append_events(
 
     # 按桶处理
     deduplicated = []
+    merged_event_ids = []  # 记录被续写合并的事件ID列表
     for new_event in new_events:
         new_actor = new_event.get("actor", "UNKNOWN")
         new_event_type = new_event.get("event_type", "other")
@@ -451,13 +474,26 @@ async def _deduplicate_and_append_events(
             continue  # 跳过重复
 
         if is_continuation and merge_target:
-            # 续写合并：更新现有事件
+            # 续写合并：更新现有事件（阶段4：保留检索就绪字段）
             merge_target["content"] = f"{merge_target.get('content', '')} [续写] {new_content}"
             merge_target["last_seen_at"] = new_time
             merge_target["importance"] = max(
                 merge_target.get("importance", 0.5),
                 new_event.get("importance", 0.5)
             )
+            merge_target["activity_score"] = max(
+                merge_target.get("activity_score", 1.0),
+                new_event.get("activity_score", 1.0)
+            )
+            # 保留关键字段用于后续检索
+            if "keywords" in new_event:
+                existing_keywords = merge_target.get("keywords", [])
+                merged_keywords = list(set(existing_keywords + new_event["keywords"]))
+                merge_target["keywords"] = merged_keywords[:5]  # 最多保留5个关键词
+
+            # 记录被合并的事件ID，后续同步到Chroma
+            if merge_target.get("event_id"):
+                merged_event_ids.append(merge_target.get("event_id"))
         else:
             deduplicated.append(new_event)
 
@@ -465,6 +501,66 @@ async def _deduplicate_and_append_events(
         memory_bank.extend(deduplicated)
         redis_client.set(memory_bank_key, json.dumps(memory_bank, ensure_ascii=False))
         logger.info(f"【历史事件入库】新增 {len(deduplicated)} 条（去重后）")
+
+        # 同步新增事件到 Chroma（wire-history-events-to-chroma）
+        for event in deduplicated:
+            try:
+                await chroma_util.upload_history_event(
+                    event_content=event.get("content", ""),
+                    event_id=event.get("event_id", ""),
+                    user_id=user_id,
+                    llm_id=llm_id,
+                    actor=event.get("actor", "UNKNOWN"),
+                    event_type=event.get("event_type", "other"),
+                    importance=event.get("importance", 0.5),
+                    keywords=event.get("keywords", []),
+                    source_round=event.get("source_round", 0),
+                    occurred_at=event.get("occurred_at", ""),
+                    last_seen_at=event.get("last_seen_at", ""),
+                    type=event.get("type", "event"),
+                    source_snippet=event.get("source_snippet", ""),
+                    activity_score=event.get("activity_score", 1.0),
+                )
+                logger.debug(f"【Chroma事件同步】成功: {event.get('event_id', '')[:30]}...")
+            except Exception as e:
+                logger.warning(f"【Chroma事件同步】失败: {event.get('event_id', '')[:30]}..., error={e}")
+                # Chroma写入失败不影响memory_bank已成功的持久化
+
+    # 续写合并事件同步到 Chroma（删除旧版本+重写新版本）
+    # 从memory_bank中找到所有被续写的事件并同步
+    if merged_event_ids:
+        for merged_id in merged_event_ids:
+            # 从memory_bank中找到该事件
+            for updated_event in memory_bank[-20:]:
+                if updated_event.get("event_id") == merged_id:
+                    try:
+                        # 删除旧版本
+                        await chroma_util.delete(
+                            ChromaTypeConstant.CHAT,
+                            event_id=merged_id,
+                        )
+                        # 上传更新后的版本
+                        await chroma_util.upload_history_event(
+                            event_content=updated_event.get("content", ""),
+                            event_id=merged_id,
+                            user_id=user_id,
+                            llm_id=llm_id,
+                            actor=updated_event.get("actor", "UNKNOWN"),
+                            event_type=updated_event.get("event_type", "other"),
+                            importance=updated_event.get("importance", 0.5),
+                            keywords=updated_event.get("keywords", []),
+                            source_round=updated_event.get("source_round", 0),
+                            occurred_at=updated_event.get("occurred_at", ""),
+                            last_seen_at=updated_event.get("last_seen_at", ""),
+                            type=updated_event.get("type", "event"),
+                            source_snippet=updated_event.get("source_snippet", ""),
+                            activity_score=updated_event.get("activity_score", 1.0),
+                        )
+                        logger.info(f"【Chroma事件续写同步】成功: {merged_id[:30]}...")
+                    except Exception as e:
+                        logger.warning(f"【Chroma事件续写同步】失败: {merged_id[:30]}..., error={e}")
+                        # Chroma续写同步失败不影响memory_bank已成功的持久化
+                    break
 
 
 async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:

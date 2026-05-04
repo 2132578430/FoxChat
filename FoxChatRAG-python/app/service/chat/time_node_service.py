@@ -4,17 +4,17 @@
 职责：
 - 创建时间节点（从用户/AI的未来事项表达中提取）
 - 归一化时间表达（明天/后天/下周）
-- 到期检查与激活
-- 激活后路由到 B 层 unfinished_items
+- 到期检查与激活（兼容保留）
+- 直接写入未完成事项（实时注入方案）
 
-第一版范围：
-- 只处理 day 精度
-- 状态机：pending → active → done
-- 不处理复杂时间表达
+实时注入方案（当前主路径）：
+- 检测到时间表达后直接写入 unfinished_items
+- 不依赖 pending → active 状态机
+- 每轮 cleanup 清理过期事项
 
-改造：使用 RedisJSON 原子操作
-- 追加节点：JSON.ARRAPPEND（原子）
-- 更新节点状态：JSON.SET（原子）
+兼容保留：
+- create_time_node() 仍可用于调试/兼容
+- route_due_time_nodes() 保留但不在主流程调用
 """
 
 import json
@@ -45,6 +45,32 @@ TIME_EXPRESSIONS = {
 # 未来事项关键词
 FUTURE_EVENT_KEYWORDS = ["考试", "出结果", "面试", "复查", "见面", "约会"]
 FUTURE_FOLLOWUP_KEYWORDS = ["提醒", "继续聊", "再聊", "跟进"]
+
+# 事件关键词词表（用于结构化去重）
+EVENT_KEYWORDS = [
+    "约会", "考试", "面试", "见面", "复查", "出差",
+    "聚餐", "旅行", "搬家", "结婚", "生日", "手术",
+    "汇报", "开会", "提交", "答辩", "签约", "入职",
+    "离职", "挂号", "复诊", "取货", "发货",
+]
+
+
+def _extract_event_keywords(text: str, time_expression: str) -> List[str]:
+    """
+    从文本中提取事件关键词（排除时间词本身）
+
+    Args:
+        text: 输入文本
+        time_expression: 已提取的时间表达（如"明天"）
+
+    Returns:
+        关键词列表，最多3个
+    """
+    keywords = []
+    for kw in EVENT_KEYWORDS:
+        if kw in text and kw != time_expression:
+            keywords.append(kw)
+    return keywords[:3]
 
 
 def _get_json_client():
@@ -394,3 +420,196 @@ def check_and_activate_due_time_nodes(user_id: str, llm_id: str) -> List[str]:
         activated_contents.append(node.content)
 
     return activated_contents
+
+
+# 阶段4新增：时间节点路由判定
+
+
+def route_due_time_nodes(user_id: str, llm_id: str, current_round: int = 0) -> dict:
+    """
+    检查到期时间节点并判定去向，返回路由结果
+
+    Args:
+        user_id: 用户 ID
+        llm_id: 模型 ID
+        current_round: 当前全局轮数
+
+    Returns:
+        {
+            "unfinished_items": [待跟进事项列表],
+            "retrieval_triggers": [检索触发节点列表],
+            "activated_count": 总激活数量
+        }
+    """
+    due_nodes = check_due_time_nodes(user_id, llm_id)
+
+    routing_result = {
+        "unfinished_items": [],
+        "retrieval_triggers": [],
+        "activated_count": 0,
+    }
+
+    # 关键词判定：承诺/待跟进类
+    followup_keywords = ["继续", "跟进", "提醒", "明天", "下次", "之后", "回头"]
+    # 关键词判定：需要背景回忆类
+    background_keywords = ["结果", "成绩", "反馈", "答复", "结果出来"]
+
+    for node in due_nodes:
+        # 激活节点
+        activate_time_node(user_id, llm_id, node)
+        routing_result["activated_count"] += 1
+
+        # 判定去向
+        content_lower = node.content.lower()
+
+        # 承诺/待跟进类：优先进入 B 层
+        is_followup = (
+            node.created_from in [CreatedFrom.AI_COMMITMENT, CreatedFrom.USER_FUTURE_FOLLOWUP]
+            or any(kw in content_lower for kw in followup_keywords)
+        )
+
+        # 需要背景回忆类：触发 C 层检索
+        needs_background = any(kw in content_lower for kw in background_keywords)
+
+        # 阶段4：标记双路由节点，便于后续去重
+        dual_routing = is_followup and needs_background
+
+        if is_followup:
+            # 路由到 B 层 unfinished_items
+            routing_result["unfinished_items"].append({
+                "content": node.content,
+                "created_at": node.created_at,  # 阶段5：传递创建时间
+                "due_at": node.due_at,          # 阶段5：传递预期时间
+                "source_node_id": node.time_node_id,
+                "confidence": 0.9,
+                "expire_rounds": 6,
+                "dual_routing": dual_routing,  # 阶段4：标记双路由
+            })
+            logger.info(f"【时间节点路由】B层: {node.content[:30]}...")
+
+        if needs_background:
+            # 路由到 C 层检索触发
+            routing_result["retrieval_triggers"].append({
+                "content": node.content,
+                "source_node_id": node.time_node_id,
+                "dual_routing": dual_routing,  # 阶段4：标记双路由
+            })
+            logger.info(f"【时间节点路由】C层触发: {node.content[:30]}...")
+
+        # 如果同时满足两种条件，允许双路由（后续去重由格式化层负责）
+
+    return routing_result
+
+
+# ============================================================
+# 实时注入方案：直接写入 unfinished_items
+# ============================================================
+
+
+def write_unfinished_item_from_time_expression(
+    user_id: str,
+    llm_id: str,
+    content: str,
+    time_expression: str,
+    source_round: int = 0,
+    keywords: List[str] = None,  # 新增：事件关键词
+) -> bool:
+    """
+    直接写入未完成事项（实时注入方案）
+
+    检测到时间表达后，归一化时间并直接写入 current_state.unfinished_items，
+    不经过 pending → active 状态机。
+
+    Args:
+        user_id: 用户 ID
+        llm_id: 模型 ID
+        content: 事项内容
+        time_expression: 时间表达（如"明天"、"后天"、"下周"）
+        source_round: 来源轮次
+        keywords: 事件关键词列表（用于结构化去重）
+
+    Returns:
+        是否成功写入
+    """
+    from app.service.chat.state_manager import update_unfinished_items
+    from app.schemas.current_state import UnfinishedItem, ItemStatus
+
+    # 复用现有归一化逻辑
+    due_at, precision = _normalize_time_expression(time_expression)
+
+    if not due_at:
+        logger.warning(f"【实时注入】无法归一化时间表达: {time_expression}")
+        return False
+
+    # 构建 UnfinishedItem（包含结构化去重字段）
+    item = UnfinishedItem(
+        content=content,
+        created_at=datetime.now().isoformat(),
+        due_at=due_at,
+        status=ItemStatus.PENDING,
+        confidence=0.85,
+        expire_rounds=6,
+        update_round=source_round,
+        update_reason=f"时间表达提取: {time_expression}",
+        time_expression=time_expression,  # 新增
+        keywords=keywords or [],          # 新增
+    )
+
+    # 直接写入 unfinished_items
+    update_unfinished_items(user_id, llm_id, [item], source_round)
+
+    logger.info(f"【实时注入】写入 unfinished_items: {content[:30]}..., due_at={due_at}")
+    return True
+
+
+def extract_and_write_unfinished_item(
+    user_id: str,
+    llm_id: str,
+    text: str,
+    is_ai_reply: bool = False,
+    source_round: int = 0,
+) -> bool:
+    """
+    从文本中提取时间表达并直接写入 unfinished_items
+
+    复用 extract_time_node_from_text 的检测逻辑，但写入目标改为 unfinished_items。
+
+    Args:
+        user_id: 用户 ID
+        llm_id: 模型 ID
+        text: 输入文本
+        is_ai_reply: 是否为 AI 回复
+        source_round: 来源轮次
+
+    Returns:
+        是否成功写入
+    """
+    # 检测时间表达
+    time_expression = None
+    for keyword in TIME_EXPRESSIONS.keys():
+        if keyword in text:
+            time_expression = keyword
+            break
+
+    if not time_expression:
+        # 检查"今晚X点"
+        if re.search(r"今晚\d+点", text):
+            time_expression = re.search(r"今晚\d+点", text).group(0)
+
+    if not time_expression:
+        return False
+
+    # 提取内容（简化版：使用整个文本的前50字）
+    content = text[:50] if len(text) > 50 else text
+
+    # 提取事件关键词（用于结构化去重）
+    keywords = _extract_event_keywords(text, time_expression)
+
+    return write_unfinished_item_from_time_expression(
+        user_id=user_id,
+        llm_id=llm_id,
+        content=content,
+        time_expression=time_expression,
+        source_round=source_round,
+        keywords=keywords,  # 新增
+    )
