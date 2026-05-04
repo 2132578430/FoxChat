@@ -59,7 +59,7 @@ class ChatMemories:
     user_profile_json: str
     memory_bank_json: str
     current_state_json: str  # 阶段2：替代 emotion_state
-    a2_candidates_json: str = ""  # 阶段5：A2 硬边界候选
+    a2_boundary_json: str = ""  # simplify-memory-a2-profile: A2 边界
 
 
 @dataclass
@@ -214,6 +214,8 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
     pip.get(build_memory_key(LLMChatConstant.CHARACTER_CARD, user_id, llm_id))
     pip.get(build_memory_key(LLMChatConstant.CORE_ANCHOR, user_id, llm_id))
     pip.get(build_memory_key(LLMChatConstant.USER_PROFILE, user_id, llm_id))
+    # simplify-memory-a2-profile: 获取 A2 边界
+    pip.get(build_memory_key(LLMChatConstant.A2_BOUNDARY, user_id, llm_id))
     pip.get(build_memory_key(LLMChatConstant.MEMORY_BANK, user_id, llm_id))
     # 阶段2：current_state 是 RedisJSON 类型，使用 JSON.GET 命令
     pip.execute_command('JSON.GET', current_state_key)
@@ -224,11 +226,15 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
 
     # JSON.GET 返回的是 dict 或 None，需要转换
     current_state_json = ""
-    if result[6]:
-        if isinstance(result[6], dict):
-            current_state_json = json.dumps(result[6], ensure_ascii=False)
+    if result[7]:  # simplify-memory-a2-profile: current_state 在 result[7]（JSON.GET 命令）
+        if isinstance(result[7], dict):
+            current_state_json = json.dumps(result[7], ensure_ascii=False)
+        elif isinstance(result[7], str):
+            current_state_json = result[7]
         else:
-            current_state_json = result[6]
+            # 异常情况：result[7] 不是 dict 也不是 str，可能是旧数据格式错误
+            logger.warning(f"current_state Redis 数据格式异常: type={type(result[7])}, value={str(result[7])[:100]}")
+            current_state_json = ""
 
     return ChatMemories(
         init_memory=result[0] or "",
@@ -236,9 +242,9 @@ async def _fetch_all_memories(user_id: str, llm_id: str) -> ChatMemories:
         character_card_json=result[2] or "",
         core_anchor_json=result[3] or "",
         user_profile_json=result[4] or "",
-        memory_bank_json=result[5] or "",
-        current_state_json=current_state_json,
-        a2_candidates_json=result[7] or "",
+        a2_boundary_json=result[5] or "",  # simplify-memory-a2-profile: A2 边界在 result[5]
+        memory_bank_json=result[6] or "",  # simplify-memory-a2-profile: memory_bank 在 result[6]
+        current_state_json=current_state_json,  # current_state 在 result[7]
     )
 
 
@@ -246,7 +252,14 @@ def _parse_all_memories(memories: ChatMemories, current_round: int = 0) -> Parse
     """解析所有记忆数据"""
     character_card_examples, character_card_detail = _parse_character_card(memories.character_card_json)
     role_declaration, core_anchor_text = _parse_core_anchor(memories.core_anchor_json)
-    user_profile_summary = _parse_user_profile(memories.user_profile_json, memories.a2_candidates_json)
+    # simplify-memory-a2-profile: A2 边界独立解析，不再拼在 user_profile 中
+    user_profile_summary = _parse_user_profile(memories.user_profile_json)
+    a2_boundary_summary = _parse_a2_boundary(memories.a2_boundary_json)
+
+    # 组合 A2 边界 + user_profile，边界在前
+    if a2_boundary_summary:
+        user_profile_summary = f"{a2_boundary_summary}\n\n{user_profile_summary}" if user_profile_summary else a2_boundary_summary
+
     memory_bank_summary = _parse_memory_bank(memories.memory_bank_json)
     # 阶段2：使用 current_state 替代 emotion_state
     # 阶段4：传入 current_round 用于过期判断
@@ -348,6 +361,45 @@ def _build_static_anchors(
     return "\n\n".join(parts) if parts else ""
 
 
+def _parse_a2_boundary(a2_boundary_json: str) -> str:
+    """
+    解析 A2 边界项（simplify-memory-a2-profile）
+
+    从 A2 边界存储中提取 active 边界项并格式化为文本块。
+    边界在前，画像在后。
+    """
+    if not a2_boundary_json:
+        return ""
+
+    try:
+        from app.schemas.a2_boundary import A2BoundaryList, A2BoundaryStatus
+
+        a2_data = json.loads(a2_boundary_json)
+        a2_list = A2BoundaryList.model_validate(a2_data)
+
+        # 只提取 active 且 high/critical priority 的边界项
+        active_items = a2_list.get_active_items()
+
+        if not active_items:
+            return ""
+
+        # 格式化为边界文本块
+        lines = ["【硬边界】"]
+        for item in active_items:
+            category = item.category.value
+            content = item.content
+            lines.append(f"- [{category}] {content}")
+
+        return "\n".join(lines)
+
+    except json.JSONDecodeError:
+        logger.warning("A2 边界 JSON 解析失败")
+        return ""
+    except Exception as e:
+        logger.warning(f"A2 边界解析失败: {e}")
+        return ""
+
+
 def _parse_a2_boundaries(a2_candidates_json: str) -> str:
     """
     解析 A2 硬边界候选（阶段5新增）
@@ -396,13 +448,10 @@ def _parse_a2_boundaries(a2_candidates_json: str) -> str:
         return ""
 
 
-def _parse_user_profile(json_str: str, a2_candidates_json: str = "") -> str:
-    """解析用户画像（阶段5：追加 A2 硬边界）"""
-    # 先解析硬边界
-    boundaries = _parse_a2_boundaries(a2_candidates_json)
-
+def _parse_user_profile(json_str: str) -> str:
+    """解析用户画像（simplify-memory-a2-profile：不再拼接 A2 边界）"""
     if not json_str:
-        return f"【硬边界】\n{boundaries}" if boundaries else ""
+        return ""
 
     def _is_placeholder(value) -> bool:
         if not value:
@@ -441,14 +490,12 @@ def _parse_user_profile(json_str: str, a2_candidates_json: str = "") -> str:
 
         profile_content = "\n".join(parts) if parts else ""
 
-        # 硬边界在顶部，用户画像在后
-        if boundaries:
-            return f"【硬边界】\n{boundaries}\n\n{profile_content}"
+        # simplify-memory-a2-profile: 只返回画像内容，边界由 _parse_a2_boundary 处理
         return profile_content
 
     except json.JSONDecodeError:
         logger.warning("user_profile JSON解析失败")
-        return f"【硬边界】\n{boundaries}" if boundaries else ""
+        return ""
 
 
 def _parse_memory_bank(json_str: str) -> str:
@@ -494,7 +541,19 @@ def _parse_current_state(json_str: str, current_round: int = 0) -> str:
         from app.schemas.current_state import CurrentState
         from datetime import datetime
 
-        state = CurrentState.model_validate_json(json_str)
+        # 先尝试解析为 JSON 对象
+        try:
+            state_dict = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"current_state JSON 字符串解析失败: {e}")
+            return _build_default_state_summary()
+
+        # 验证是否为 dict 类型
+        if not isinstance(state_dict, dict):
+            logger.warning(f"current_state JSON 不是 dict: type={type(state_dict)}, value={str(state_dict)[:100]}")
+            return _build_default_state_summary()
+
+        state = CurrentState.model_validate(state_dict)
 
         # 获取有效字段
         valid_fields = state.get_valid_fields_for_injection(current_round)
@@ -623,8 +682,14 @@ async def _invoke_llm(
     """调用 LLM 生成回复"""
     from app.service.chat.prompt_payload_builder import build_prompt_payload, payload_to_invoke_dict
 
-    # 性能关键点：_build_chat_chain
-    chain = await _build_chat_chain()
+    # 构建 Prompt Template（不使用 _build_chat_chain，直接构建以获取 token 信息）
+    template = ChatPromptTemplate(
+        [
+            ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
+            MessagesPlaceholder("history_msg"),
+            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template:\n{user_message}")
+        ]
+    )
 
     # 性能关键点：get_soul
     soul = await PromptManager.get_soul("soul")
@@ -668,7 +733,50 @@ async def _invoke_llm(
         logger.info(f"【Payload去重】移除: {payload.duplicates_removed}")
 
     logger.debug("api调用llm最后提示")
-    return await chain.ainvoke(payload_to_invoke_dict(payload))
+
+    # 不使用 StrOutputParser，直接获取 AIMessage 以读取 token 信息
+    llm = await llm_model.get_chat_model()
+    chain_for_tokens = template | RunnableLambda(_print_template) | llm
+
+    # 调用 LLM，获取 AIMessage
+    aimessage = await chain_for_tokens.ainvoke(payload_to_invoke_dict(payload))
+
+    # 提取 token 消耗信息（DeepSeek 在 response_metadata 中返回）
+    token_info = {}
+    if hasattr(aimessage, 'response_metadata'):
+        usage = aimessage.response_metadata.get('token_usage', {})
+        if usage:
+            token_info = {
+                'prompt_tokens': usage.get('prompt_tokens', 0),
+                'completion_tokens': usage.get('completion_tokens', 0),
+                'total_tokens': usage.get('total_tokens', 0),
+            }
+
+            # 输出token消耗日志
+            logger.info(
+                f"【Token消耗】Prompt={token_info['prompt_tokens']}, "
+                f"Completion={token_info['completion_tokens']}, "
+                f"Total={token_info['total_tokens']}"
+            )
+
+    # 备用方案：某些模型通过 usage_metadata 返回
+    if not token_info and hasattr(aimessage, 'usage_metadata'):
+        meta = aimessage.usage_metadata
+        token_info = {
+            'prompt_tokens': meta.get('input_tokens', 0),
+            'completion_tokens': meta.get('output_tokens', 0),
+            'total_tokens': meta.get('input_tokens', 0) + meta.get('output_tokens', 0),
+        }
+        logger.info(
+            f"【Token消耗】Prompt={token_info['prompt_tokens']}, "
+            f"Completion={token_info['completion_tokens']}, "
+            f"Total={token_info['total_tokens']}"
+        )
+
+    # 提取响应文本
+    response_text = aimessage.content if hasattr(aimessage, 'content') else str(aimessage)
+
+    return response_text
 
 
 async def _search_relevant_memories(

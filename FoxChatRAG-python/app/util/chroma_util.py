@@ -31,9 +31,20 @@ async def delete(chroma_type: ChromaTypeConstant, **metadata):
         where=_build_chroma_filter(metadata)
     )
 
-async def search(chroma_type: ChromaTypeConstant, msg_content:str, metadata: dict | None = None) -> List[Document]:
+async def search(
+    chroma_type: ChromaTypeConstant,
+    msg_content: str,
+    metadata: dict | None = None,
+    limit: int = 5
+) -> List[Document]:
     """
-    # 根据消息和元数据获取chroma中的字段
+    根据消息和元数据获取chroma中的字段
+
+    Args:
+        chroma_type: 向量库类型
+        msg_content: 检索文本
+        metadata: 元数据过滤条件
+        limit: 返回结果数量上限（默认5）
     """
     import time
     from loguru import logger
@@ -57,7 +68,7 @@ async def search(chroma_type: ChromaTypeConstant, msg_content:str, metadata: dic
     chroma_filter = _build_chroma_filter(metadata)
     results = chroma._collection.query(
         query_embeddings=[embedding],
-        k=5,
+        n_results=limit,  # ChromaDB 使用 n_results，不是 k
         where=chroma_filter,
     )
     t2 = time.time()
@@ -207,6 +218,7 @@ async def search_history_events(
         ChromaTypeConstant.CHAT,
         query,
         base_metadata,
+        limit=k  # 传递检索数量限制
     )
 
     # 按重要性和时间排序后截取 top-k

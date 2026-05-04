@@ -19,6 +19,9 @@ class LLMChatConstant(StrEnum):
     ROLE_CURRENT_STATE = "role_current_state"
     ROLE_TIME_NODES = "role_time_nodes"
 
+    # simplify-memory-a2-profile: A2 边界存储
+    A2_BOUNDARY = "a2_boundary"
+
 
 def build_memory_key(suffix: str, user_id: str, llm_id: str) -> str:
     return f"{LLMChatConstant.CHAT_MEMORY}{user_id}:{llm_id}:{suffix}"

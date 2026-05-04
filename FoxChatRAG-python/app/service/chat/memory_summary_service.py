@@ -30,8 +30,9 @@ from app.core.prompts.prompt_template import PromptTemplate
 from app.util import loader_util, chroma_util
 from app.util.template_util import escape_template
 from app.service.chat.user_profile_service import update_user_profile_in_summary
-from app.service.chat.candidate_router_service import route_summary_candidates
-from app.schemas.summary_candidate import SummaryBatchResult
+# 移除 candidate router 主路径依赖（simplify-memory-a2-profile）
+# from app.service.chat.candidate_router_service import route_summary_candidates
+# from app.schemas.summary_candidate import SummaryBatchResult
 
 MEMORY_BANK_MAX_SIZE = 50
 MEMORY_BANK_COMPRESS_TARGET = 30
@@ -208,160 +209,162 @@ async def _summary_and_upload(recent_msg_list: List[str], user_id: str, llm_id: 
     return summary_msg
 
 
-async def _process_candidates(
-    candidates: SummaryBatchResult,
-    user_id: str,
-    llm_id: str,
-) -> None:
-    """
-    处理四路候选并写回
-
-    阶段3新增：分流后的候选分别写回对应存储
-    """
-    from app.service.chat.state_manager import update_current_state, get_current_state, get_current_round
-    from app.service.chat.time_node_service import create_time_node
-    from app.schemas.current_state import UpdateSource
-
-    current_round = get_current_round(user_id, llm_id)
-
-    # 1. A2 候选处理
-    await _process_a2_candidates(candidates.a2_candidates, user_id, llm_id)
-
-    # 2. 当前状态候选处理
-    await _process_current_state_candidates(
-        candidates.current_state_candidates,
-        user_id,
-        llm_id,
-        current_round,
-    )
-
-    # 3. 时间节点候选处理
-    await _process_time_node_candidates(
-        candidates.time_node_candidates,
-        user_id,
-        llm_id,
-    )
-
-    # 4. 历史事件候选处理（写入 memory_bank）
-    await _process_history_event_candidates(
-        candidates.history_event_candidates,
-        user_id,
-        llm_id,
-    )
-
-
-async def _process_a2_candidates(
-    candidates: list,
-    user_id: str,
-    llm_id: str,
-) -> None:
-    """处理 A2 候选"""
-    if not candidates:
-        return
-
-    # 阶段3第一版：A2 候先写入过渡存储
-    # 后续阶段会独立 A2 容器
-    a2_key = f"chat:memory:{user_id}:{llm_id}:a2_candidates"
-
-    existing = redis_client.get(a2_key)
-    if existing:
-        try:
-            existing_list = json.loads(existing)
-        except json.JSONDecodeError:
-            existing_list = []
-    else:
-        existing_list = []
-
-    for candidate in candidates:
-        if candidate.should_promote_immediately():
-            # 直接提升为活跃边界
-            logger.info(f"【A2提升】立即提升: {candidate.content[:30]}...")
-            existing_list.append({
-                "content": candidate.content,
-                "category": candidate.category.value,
-                "priority": candidate.priority,
-                "is_active": True,
-                "source": "explicit",
-                "created_at": datetime.now().isoformat(),
-            })
-        else:
-            # 保留为候选，等待重复证据
-            logger.debug(f"【A2候选】保留待证: {candidate.content[:30]}...")
-            existing_list.append({
-                "content": candidate.content,
-                "category": candidate.category.value,
-                "priority": candidate.priority,
-                "is_active": False,
-                "evidence_count": candidate.evidence_count,
-                "source": "inference",
-                "needs_repeated_evidence": True,
-                "created_at": datetime.now().isoformat(),
-            })
-
-    redis_client.set(a2_key, json.dumps(existing_list, ensure_ascii=False))
+# 移除 candidate 分流主路径（simplify-memory-a2-profile）
+# async def _process_candidates(
+#     candidates: SummaryBatchResult,
+#     user_id: str,
+#     llm_id: str,
+# ) -> None:
+#     """
+#     处理四路候选并写回
+#
+#     阶段3新增：分流后的候选分别写回对应存储
+#     """
+#     from app.service.chat.state_manager import update_current_state, get_current_state, get_current_round
+#     from app.service.chat.time_node_service import create_time_node
+#     from app.schemas.current_state import UpdateSource
+#
+#     current_round = get_current_round(user_id, llm_id)
+#
+#     # 1. A2 候选处理
+#     await _process_a2_candidates(candidates.a2_candidates, user_id, llm_id)
+#
+#     # 2. 当前状态候选处理
+#     await _process_current_state_candidates(
+#         candidates.current_state_candidates,
+#         user_id,
+#         llm_id,
+#         current_round,
+#     )
+#
+#     # 3. 时间节点候选处理
+#     await _process_time_node_candidates(
+#         candidates.time_node_candidates,
+#         user_id,
+#         llm_id,
+#     )
+#
+#     # 4. 历史事件候选处理（写入 memory_bank）
+#     await _process_history_event_candidates(
+#         candidates.history_event_candidates,
+#         user_id,
+#         llm_id,
+#     )
 
 
-async def _process_current_state_candidates(
-    candidates: list,
-    user_id: str,
-    llm_id: str,
-    current_round: int,
-) -> None:
-    """处理当前状态候选"""
-    from app.service.chat.state_manager import update_current_state, update_unfinished_items
-    from app.schemas.current_state import UpdateSource, UnfinishedItem, ItemStatus
-
-    for candidate in candidates:
-        if candidate.field_name == "unfinished_items":
-            # 处理未完成事项
-            if candidate.unfinished_content:
-                item = UnfinishedItem(
-                    content=candidate.unfinished_content,
-                    status=ItemStatus.PENDING,
-                    confidence=candidate.confidence,
-                    expire_rounds=candidate.expire_rounds,
-                    update_reason=candidate.update_reason,
-                )
-                update_unfinished_items(user_id, llm_id, [item], current_round)
-        else:
-            # 处理其他状态字段
-            update_current_state(
-                user_id=user_id,
-                llm_id=llm_id,
-                field_name=candidate.field_name,
-                new_value=candidate.value,
-                confidence=candidate.confidence,
-                source=UpdateSource.SUMMARY,
-                expire_rounds=candidate.expire_rounds,
-                reason=candidate.update_reason,
-                current_round=current_round,
-            )
-        logger.debug(f"【状态候选写入】{candidate.field_name}: {candidate.value}")
-
-
-async def _process_time_node_candidates(
-    candidates: list,
-    user_id: str,
-    llm_id: str,
-) -> None:
-    """处理时间节点候选（实时注入方案：直接写入 unfinished_items）"""
-    from app.service.chat.time_node_service import write_unfinished_item_from_time_expression
-
-    for candidate in candidates:
-        if not candidate.is_valid_time:
-            continue
-
-        # 直接写入 unfinished_items
-        written = write_unfinished_item_from_time_expression(
-            user_id=user_id,
-            llm_id=llm_id,
-            content=candidate.content,
-            time_expression=candidate.time_expression,
-            source_round=candidate.source_round,
-        )
-
-        if written:
-            logger.info(f"【实时注入】时间表达写入: {candidate.time_expression}: {candidate.content[:30]}...")
+# 移除 candidate 分流主路径（simplify-memory-a2-profile）
+# async def _process_a2_candidates(
+#     candidates: list,
+#     user_id: str,
+#     llm_id: str,
+# ) -> None:
+#     """处理 A2 候选"""
+#     if not candidates:
+#         return
+#
+#     # 阶段3第一版：A2 候先写入过渡存储
+#     # 后续阶段会独立 A2 容器
+#     a2_key = f"chat:memory:{user_id}:{llm_id}:a2_candidates"
+#
+#     existing = redis_client.get(a2_key)
+#     if existing:
+#         try:
+#             existing_list = json.loads(existing)
+#         except json.JSONDecodeError:
+#             existing_list = []
+#     else:
+#         existing_list = []
+#
+#     for candidate in candidates:
+#         if candidate.should_promote_immediately():
+#             # 直接提升为活跃边界
+#             logger.info(f"【A2提升】立即提升: {candidate.content[:30]}...")
+#             existing_list.append({
+#                 "content": candidate.content,
+#                 "category": candidate.category.value,
+#                 "priority": candidate.priority,
+#                 "is_active": True,
+#                 "source": "explicit",
+#                 "created_at": datetime.now().isoformat(),
+#             })
+#         else:
+#             # 保留为候选，等待重复证据
+#             logger.debug(f"【A2候选】保留待证: {candidate.content[:30]}...")
+#             existing_list.append({
+#                 "content": candidate.content,
+#                 "category": candidate.category.value,
+#                 "priority": candidate.priority,
+#                 "is_active": False,
+#                 "evidence_count": candidate.evidence_count,
+#                 "source": "inference",
+#                 "needs_repeated_evidence": True,
+#                 "created_at": datetime.now().isoformat(),
+#             })
+#
+#     redis_client.set(a2_key, json.dumps(existing_list, ensure_ascii=False))
+#
+#
+# async def _process_current_state_candidates(
+#     candidates: list,
+#     user_id: str,
+#     llm_id: str,
+#     current_round: int,
+# ) -> None:
+#     """处理当前状态候选"""
+#     from app.service.chat.state_manager import update_current_state, update_unfinished_items
+#     from app.schemas.current_state import UpdateSource, UnfinishedItem, ItemStatus
+#
+#     for candidate in candidates:
+#         if candidate.field_name == "unfinished_items":
+#             # 处理未完成事项
+#             if candidate.unfinished_content:
+#                 item = UnfinishedItem(
+#                     content=candidate.unfinished_content,
+#                     status=ItemStatus.PENDING,
+#                     confidence=candidate.confidence,
+#                     expire_rounds=candidate.expire_rounds,
+#                     update_reason=candidate.update_reason,
+#                 )
+#                 update_unfinished_items(user_id, llm_id, [item], current_round)
+#         else:
+#             # 处理其他状态字段
+#             update_current_state(
+#                 user_id=user_id,
+#                 llm_id=llm_id,
+#                 field_name=candidate.field_name,
+#                 new_value=candidate.value,
+#                 confidence=candidate.confidence,
+#                 source=UpdateSource.SUMMARY,
+#                 expire_rounds=candidate.expire_rounds,
+#                 reason=candidate.update_reason,
+#                 current_round=current_round,
+#             )
+#         logger.debug(f"【状态候选写入】{candidate.field_name}: {candidate.value}")
+#
+#
+# async def _process_time_node_candidates(
+#     candidates: list,
+#     user_id: str,
+#     llm_id: str,
+# ) -> None:
+#     """处理时间节点候选（实时注入方案：直接写入 unfinished_items）"""
+#     from app.service.chat.time_node_service import write_unfinished_item_from_time_expression
+#
+#     for candidate in candidates:
+#         if not candidate.is_valid_time:
+#             continue
+#
+#         # 直接写入 unfinished_items
+#         written = write_unfinished_item_from_time_expression(
+#             user_id=user_id,
+#             llm_id=llm_id,
+#             content=candidate.content,
+#             time_expression=candidate.time_expression,
+#             source_round=candidate.source_round,
+#         )
+#
+#         if written:
+#             logger.info(f"【实时注入】时间表达写入: {candidate.time_expression}: {candidate.content[:30]}...")
 
 
 async def _process_history_event_candidates(
@@ -596,26 +599,23 @@ async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: 
     # 1. 上传向量数据库（获取总结文本）
     summary_text = await _summary_and_upload(recent_msg_list, user_id, llm_id)
 
-    # 2. 阶段3：候选分流与写回
-    from app.service.chat.state_manager import get_current_round
-    current_round = get_current_round(user_id, llm_id)
+    # 2. 简化链路：直接调用 A2 边界提取、user_profile 更新与 memory_bank 保底沉淀
+    # 移除通用 candidate 分流总线，改为职责收敛的三路处理
+    from app.service.chat.a2_boundary_service import update_a2_boundaries_in_summary
 
-    candidates = route_summary_candidates(
-        summary_text=summary_text,
-        current_round=current_round,
-        window_size=len(recent_msg_list),
-    )
+    # 2.1 A2 边界提取与写回
+    await update_a2_boundaries_in_summary(user_id, llm_id, summary_text)
 
-    await _process_candidates(candidates, user_id, llm_id)
+    # 2.2 user_profile 更新（后续任务 3.3 会调整）
+    # TODO: 调整 user_profile 更新链路（任务 3.3）
 
-    # 3. 兼容链路：保留旧事件提取（作为兜底）
-    if not candidates.history_event_candidates:
-        events = await _extract_memory_events(recent_msg_list)
-        if events:
-            await _append_to_memory_bank(events, user_id, llm_id)
+    # 3. 兼容链路：保留旧事件提取作为 memory_bank 保底
+    events = await _extract_memory_events(recent_msg_list)
+    if events:
+        await _append_to_memory_bank(events, user_id, llm_id)
 
     # 4. 压缩 memory_bank
     await _compress_memory_bank_if_needed(user_id, llm_id)
 
-    # 5. 更新用户画像
+    # 5. 更新用户画像（保持 summary 周期触发）
     await update_user_profile_in_summary(user_id, llm_id, recent_msg_list)
