@@ -78,33 +78,41 @@ FoxChatRAG-python/
 ├── app/
 │   ├── api/                    # 路由层：定义 RESTful 接口
 │   ├── service/chat/           # 业务层：核心对话服务
-│   │   ├── chat_msg_service.py     # 对话主流程入口
-│   │   ├── memory_summary_service.py # 记忆总结与候选分流
+│   │   ├── chat_msg_service.py         # 对话主流程入口
+│   │   ├── memory_summary_service.py   # 记忆总结与候选分流
 │   │   ├── candidate_router_service.py # 阶段3候选路由
-│   │   ├── a2_candidate_service.py   # A2边界提取
-│   │   ├── state_manager.py          # 当前状态容器管理
-│   │   ├── time_node_service.py      # 时间节点运行时
-│   │   ├── runtime_state_extractor.py # runtime状态提取
-│   │   ├── emotion_classifier.py     # 情绪分类
-│   │   └── user_profile_service.py   # 用户画像更新
+│   │   ├── a2_candidate_service.py     # A2边界提取
+│   │   ├── state_manager.py            # 当前状态容器管理
+│   │   ├── time_node_service.py        # 时间节点运行时
+│   │   ├── runtime_state_extractor.py  # runtime状态提取
+│   │   ├── emotion_classifier.py       # 情绪分类
+│   │   ├── user_profile_service.py     # 用户画像更新
+│   │   ├── history_event_retrieval_service.py # 历史事件检索（阶段4）
+│   │   └── prompt_payload_builder.py   # Prompt构建器（阶段6）
 │   ├── core/
 │   │   ├── prompts/            # Prompt 模板
-│   │   │   ├── soul.md             # 角色灵魂定义
+│   │   │   ├── soul.md                 # 角色灵魂定义
 │   │   │   ├── memory_event_extractor.md # 历史事件提取
 │   │   │   ├── current_state_extractor.md # 状态提取模板
-│   │   │   └── time_node_extractor.md    # 时间节点提取规则
-│   │   └── db/                 # 数据库连接
+│   │   │   ├── time_node_extractor.md    # 时间节点提取规则
+│   │   │   └── prompt_template.py      # Prompt模板常量
+│   │   ├── llm_model/          # LLM 模型管理
+│   │   ├── mq/                 # RabbitMQ 消息队列
+│   │   └── db/                 # 数据库连接（Redis、MySQL）
 │   ├── schemas/                # 数据模型：Pydantic 模型定义
-│   │   ├── current_state.py        # 当前状态容器 Schema
-│   │   ├── time_node.py            # 时间节点 Schema
-│   │   ├── memory_event.py         # 历史事件 Schema
-│   │   └── summary_candidate.py    # 候选数据结构
-│   ├── common/                 # 公共模块：常量定义
-│   └── exception/              # 异常处理
-├── scripts/                    # 测试脚本
-│   ├── test_current_state_lifecycle.py
-│   ├── test_time_node_activation.py
-│   └── test_phase3_routing.py
+│   │   ├── current_state.py    # 当前状态容器 Schema
+│   │   ├── time_node.py        # 时间节点 Schema
+│   │   ├── memory_event.py     # 历史事件 Schema
+│   │   └── summary_candidate.py # 候选数据结构
+│   ├── common/constant/        # 公共模块：常量定义
+│   ├── exception/              # 异常处理
+│   ├── util/                   # 工具类（Chroma、文本处理）
+│   └── models/                 # ORM 模型
+├── scripts/                    # 测试/验证脚本
+│   ├── test_history_event_retrieval_service_compile.py
+│   ├── verify_history_event_indexing.py
+│   └── memory_validation_runner.py
+├── docs/                       # 设计文档与审计报告
 ├── main.py                     # 入口文件
 └── README.md                   # 项目说明文档
 ```
@@ -157,17 +165,23 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 | 阶段1 | ✅ 完成 | 对象契约定义 |
 | 阶段2 | ✅ 完成 | current_state容器 + time_node运行时 |
 | 阶段3 | ✅ 完成 | 总结候选四路分流 |
-| 阶段4 | 📋 待实施 | History Retrieval V1 |
-| 阶段5 | 📋 待实施 | History Retrieval V2（可选）|
-| 阶段6 | 📋 待实施 | Prompt Layout V2 |
+| 阶段4 | ⚠️ 基本完成 | History Retrieval V1（BM25 + 向量 + Rerank） |
+| 阶段5 | ⚠️ 基本完成 | Prompt Layout V2 + A2边界注入 + 未完成事项时间上下文 |
+| 阶段6 | ⚠️ 基本完成 | Payload Builder 统一构建 + 空块省略 + 去重 |
 
 ### 关键文件说明
 
+**核心服务**
 - **`chat_msg_service.py`**: 对话主入口，负责记忆获取、LLM调用、后台任务触发
 - **`memory_summary_service.py`**: 每9轮触发总结，执行候选分流与写回
 - **`state_manager.py`**: 管理 Redis 中的 current_state 存储，支持覆盖与过期
 - **`time_node_service.py`**: 时间节点创建、到期检查、激活逻辑
 - **`candidate_router_service.py`**: 阶段3核心分流器，规则优先路由
+
+**检索与构建（阶段4-6）**
+- **`history_event_retrieval_service.py`**: 历史事件检索，BM25 + 向量混合检索 + Rerank
+- **`prompt_payload_builder.py`**: 统一 Prompt Payload 构建，支持去重、冲突优先级、空块省略
+- **`runtime_state_extractor.py`**: LLM 返回状态提取，更新 current_state
 
 ### 全局异常处理
 项目使用 `BusinessException` 配合 `MsgStatusConstant` 进行业务错误管理。所有异常都会被 `GlobalExceptionHandler` 捕获并返回统一格式的 JSON。

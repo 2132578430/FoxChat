@@ -107,9 +107,13 @@ FoxChat/
 │   ├── app/
 │   │   ├── api/          # API 路由
 │   │   ├── service/      # 业务逻辑
-│   │   ├── core/         # 核心配置
-│   │   └── util/         # 工具
-│   ├── store/            # Chroma 向量库
+│   │   ├── core/         # 核心配置（Prompts、DB、LLM）
+│   │   ├── schemas/      # 数据模型定义
+│   │   ├── common/       # 常量定义
+│   │   └── exception/    # 异常处理
+│   ├── scripts/          # 测试脚本
+│   ├── docs/             # 设计文档
+│   ├── store/            # Chroma 向量库（本地）
 │   └── README.md
 │
 ├── docker-compose.yml    # 中间件配置
