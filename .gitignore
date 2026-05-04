@@ -21,6 +21,7 @@ FoxChatRAG-python/store/
 .trae/*
 .opencode/*
 .claude/*
+.agents/
 openspec/
 
 # 私密配置文件
