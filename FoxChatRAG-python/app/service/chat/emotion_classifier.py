@@ -13,28 +13,10 @@ from langchain_core.prompts import PromptTemplate
 from loguru import logger
 
 from app.core.llm_model import get_emotion_model
+from app.core.prompts.prompt_manager import PromptManager
 from app.service.chat.state_manager import update_current_state, get_current_state
 from app.schemas.current_state import UpdateSource
 from app.util.template_util import escape_template
-
-EMOTION_PROMPT_RAW = """分析角色回复的情绪状态，输出JSON格式结果。
-
-角色回复：{model_reply}
-
-任务：判断角色回复中流露的情绪，输出JSON：
-{"emotion": "情绪词", "certainty": "确定或不确定"}
-
-情绪选项：开心、悲伤、愤怒、惊讶、恐惧、厌恶、neutral
-确定性选项：确定、不确定
-
-规则：
-- 只分析情绪，不要回复角色内容
-- 只输出JSON，不要其他文字
-- 根据语气、表情、动作描述判断情绪
-
-输出："""
-
-EMOTION_PROMPT = escape_template(EMOTION_PROMPT_RAW, ["model_reply"])
 
 
 async def classify_emotion(model_reply: str) -> tuple[str, str]:
@@ -53,7 +35,9 @@ async def classify_emotion(model_reply: str) -> tuple[str, str]:
             logger.warning("情绪分类模型未配置，跳过分类")
             return ("neutral", "不确定")
         
-        prompt = PromptTemplate.from_template(EMOTION_PROMPT)
+        prompt_text = await PromptManager.get_prompt("emotion_classifier")
+        prompt_text = escape_template(prompt_text, ["model_reply"])
+        prompt = PromptTemplate.from_template(prompt_text)
         chain = prompt | llm
         
         response = await chain.ainvoke({"model_reply": model_reply})

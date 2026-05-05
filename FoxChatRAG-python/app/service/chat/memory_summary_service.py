@@ -28,7 +28,6 @@ from app.common.constant.LLMChatConstant import LLMChatConstant, build_memory_ke
 from app.core.db.redis_client import redis_client
 from app.core.llm_model import model as llm_model
 from app.core.prompts.prompt_manager import PromptManager
-from app.core.prompts.prompt_template import PromptTemplate
 from app.util import loader_util, chroma_util
 from app.util.template_util import escape_template
 from app.service.chat.user_profile_service import update_user_profile_in_summary
@@ -73,9 +72,11 @@ async def _build_summary_chain():
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
+    prompt_str = await PromptManager.get_prompt("memory_summary")
+    prompt_str = escape_template(prompt_str, ["recent_msg_list"])
     template = ChatPromptTemplate(
         [
-            ("system", PromptTemplate.SUMMARY_SYSTEM_PROMPT_TEMPLATE),
+            ("system", prompt_str),
             ("human", "The chat history between the user and the role currently played by the AI is: {chat_history_msg}")
         ]
     )
@@ -169,21 +170,12 @@ async def _compress_memory_bank_if_needed(user_id: str, llm_id: str) -> None:
 
     logger.info(f"memory_bank 长度 {len(memory_bank)} 超过阈值，开始压缩...")
 
-    compress_prompt = f"""将以下记忆库压缩到 {MEMORY_BANK_COMPRESS_TARGET} 条核心事件。
-    要求：
-    - 合并相似事件
-    - 保留最重要的关键事件
-    - 保持 time、type、actor、content、keywords 字段
-    - actor 字段必须保留，明确主体归属
-    - keywords 字段合并相似关键词
-    - 输出 JSON 数组格式
-    - 只输出 JSON 数组，不要其他文字
-
-    当前记忆库：
-    {json.dumps(memory_bank, ensure_ascii=False, indent=2)}
-
-    压缩后的记忆库：
-    """
+    prompt_str = await PromptManager.get_prompt("memory_bank_compress")
+    prompt_str = escape_template(prompt_str, ["target_size", "memory_bank_json"])
+    compress_prompt = prompt_str.format(
+        target_size=MEMORY_BANK_COMPRESS_TARGET,
+        memory_bank_json=json.dumps(memory_bank, ensure_ascii=False, indent=2),
+    )
 
     llm = await llm_model.get_memory_model()
     compressed = await llm.ainvoke(compress_prompt)

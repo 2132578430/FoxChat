@@ -93,9 +93,13 @@ FoxChatRAG-python/
 │   │   ├── prompts/            # Prompt 模板
 │   │   │   ├── soul.md                 # 角色灵魂定义
 │   │   │   ├── memory_event_extractor.md # 历史事件提取
-│   │   │   ├── current_state_extractor.md # 状态提取模板
-│   │   │   ├── time_node_extractor.md    # 时间节点提取规则
-│   │   │   └── prompt_template.py      # Prompt模板常量
+│   │   │   ├── chat_system.md            # 对话主系统 Prompt
+│   │   │   ├── memory_summary.md         # 对话总结 Prompt
+│   │   │   ├── memory_event_extractor.md # 历史事件提取 Prompt
+│   │   │   ├── memory_bank_compress.md   # Memory Bank 压缩 Prompt
+│   │   │   ├── emotion_classifier.md     # 情绪分类 Prompt
+│   │   │   ├── focus_extractor.md        # 焦点提取 Prompt
+│   │   │   └── soul.md                   # 角色灵魂定义
 │   │   ├── llm_model/          # LLM 模型管理
 │   │   ├── mq/                 # RabbitMQ 消息队列
 │   │   └── db/                 # 数据库连接（Redis、MySQL）

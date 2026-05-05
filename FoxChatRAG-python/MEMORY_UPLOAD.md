@@ -759,7 +759,7 @@ async def retrieve_relevant_memory(user_message: str, memory_bank: List[dict]) -
 |------|------|
 | `app/service/memory_upload_service.py` | 初始记忆上传处理 |
 | `app/service/chat_msg_service.py` | 对话消息处理 |
-| `app/core/prompts/prompt_template.py` | 提示词模板 |
+| `app/core/prompts/chat_system.md` | 对话主系统提示词模板 |
 | `app/common/constant/LLMChatConstant.py` | Redis Key 常量 |
 | `Problem.md` | 问题背景与用户画像模板 |
 

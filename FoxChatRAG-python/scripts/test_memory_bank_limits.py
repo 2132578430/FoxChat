@@ -58,6 +58,8 @@ async def test_memory_bank_config(
     )
     from app.service.chat.prompt_payload_builder import build_prompt_payload, payload_to_invoke_dict
     from app.core.llm_model import model as llm_model
+    from app.core.prompts.prompt_manager import PromptManager
+    from app.util.template_util import escape_template
 
     # 创建监控器
     config = TokenMonitorConfig(max_memory_bank_items=memory_bank_limit)
@@ -138,13 +140,17 @@ async def test_memory_bank_config(
             enable_conflict_priority=True,
         )
 
-        # 构建 Prompt Template（复用现有模板）
+        # 构建 Prompt Template（复用 markdown 模板）
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from app.core.prompts.prompt_template import PromptTemplate
 
+        prompt_text = await PromptManager.get_prompt("chat_system")
+        prompt_text = escape_template(
+            prompt_text,
+            ["static_anchors", "user_profile_summary", "historical_context", "current_state"],
+        )
         template = ChatPromptTemplate(
             [
-                ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
+                ("system", prompt_text),
                 MessagesPlaceholder("history_msg"),
                 ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template:\n{user_message}")
             ]

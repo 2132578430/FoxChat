@@ -32,8 +32,7 @@ from app.common.constant.MsgStatusConstant import MsgStatusConstant
 from app.core.db.redis_client import redis_client
 from app.core.llm_model import model as llm_model
 from app.core.prompts.prompt_manager import PromptManager
-from app.core.prompts.prompt_template import PromptTemplate
-from app.service.chat.state_manager import get_current_state, check_and_expire_fields, increment_round_counter, get_current_round, clean_expired_unfinished_items
+from app.service.chat.state_manager import increment_round_counter
 from app.service.chat.history_event_retrieval_service import (
     should_trigger_history_retrieval,
     retrieve_history_events_v2,
@@ -45,10 +44,11 @@ from app.schemas.current_state import CurrentState, ItemStatus
 from app.service.chat.memory_summary_service import trigger_summary_with_counter
 from app.service.chat.timer_scheduler import SUMMARY_MAX_TRIGGER_THRESHOLD
 from app.service.chat.emotion_classifier import classify_and_update_emotion
+from app.service.chat.focus_extractor import classify_and_update_focus
 from app.service.chat.runtime_state_extractor import update_current_state_from_runtime
 from app.util import chroma_util, strip_all_tags, strip_think_only
+from app.util.template_util import escape_template
 from fastapi import BackgroundTasks
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.language_models.chat_models import BaseMessage
@@ -182,11 +182,18 @@ async def process_chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) ->
         # 阶段2新增：先递增轮数，获取当前轮数用于过期判断
         current_round = increment_round_counter(user_id, llm_id)
 
-        # 同步状态更新：保证下一请求能看到完整更新
-        # 情绪分类（异步函数，需要 await）
-        await classify_and_update_emotion(user_id, llm_id, pure_text, current_round)
+        # 并发状态更新：保证下一请求能看到完整更新，延迟不增加
+        # Phase 1: 并发调用 emotion + focus (async)，runtime_state_extractor 保持同步调用
+        await asyncio.gather(
+            # 情绪分类（已有）
+            classify_and_update_emotion(user_id, llm_id, pure_text, current_round),
+            # 话题焦点提取（新增 Phase 1）
+            classify_and_update_focus(user_id, llm_id, msg_content, current_round),
+        )
+        logger.debug(f"【并发提取】emotion + focus 完成，current_round={current_round}")
 
         # 运行时状态更新（同步函数，直接调用）
+        # 注意：Phase 1 保留 runtime_state_extractor，后续 Phase 会替换为 LLM 提取
         update_current_state_from_runtime(
             user_id, llm_id, msg_content, pure_text, current_round
         )
@@ -399,7 +406,7 @@ def _parse_a2_boundary(a2_boundary_json: str) -> str:
         return ""
 
     try:
-        from app.schemas.a2_boundary import A2BoundaryList, A2BoundaryStatus
+        from app.schemas.a2_boundary import A2BoundaryList
 
         a2_data = json.loads(a2_boundary_json)
         a2_list = A2BoundaryList.model_validate(a2_data)
@@ -426,53 +433,6 @@ def _parse_a2_boundary(a2_boundary_json: str) -> str:
         logger.warning(f"A2 边界解析失败: {e}")
         return ""
 
-
-def _parse_a2_boundaries(a2_candidates_json: str) -> str:
-    """
-    解析 A2 硬边界候选（阶段5新增）
-
-    筛选 is_active=True 且 priority in {high, critical} 的条目，
-    按 priority 降序排列，格式化为列表。
-
-    Args:
-        a2_candidates_json: a2_candidates Redis key 的 JSON 内容
-
-    Returns:
-        格式化后的硬边界字符串，若无有效条目返回空字符串
-    """
-    if not a2_candidates_json:
-        return ""
-
-    try:
-        candidates = json.loads(a2_candidates_json)
-        if not isinstance(candidates, list):
-            return ""
-
-        # 筛选 active 且 high/critical priority
-        valid = [
-            c for c in candidates
-            if c.get("is_active") and c.get("priority") in ("high", "critical")
-        ]
-
-        if not valid:
-            return ""
-
-        # 按 priority 降序：critical > high
-        priority_order = {"critical": 0, "high": 1}
-        valid.sort(key=lambda c: priority_order.get(c.get("priority"), 2))
-
-        # 格式化
-        lines = []
-        for c in valid:
-            category = c.get("category", "其他")
-            content = c.get("content", "")
-            if content:
-                lines.append(f"- [{category}] {content}")
-
-        return "\n".join(lines) if lines else ""
-
-    except json.JSONDecodeError:
-        return ""
 
 
 def _parse_user_profile(json_str: str) -> str:
@@ -679,22 +639,6 @@ def _map_emotion_to_cn(emotion: str) -> str:
 
 # ==================== 私有函数 - LLM调用 ====================
 
-async def _build_chat_chain():
-    """构建对话 Chain"""
-    template = ChatPromptTemplate(
-        [
-            ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
-            MessagesPlaceholder("history_msg"),
-            ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template：\n{user_message}")
-        ]
-    )
-
-    str_parser = StrOutputParser()
-    llm = await llm_model.get_chat_model()
-    chain = template | RunnableLambda(_print_template) | llm | str_parser
-    return chain
-
-
 async def _invoke_llm(
     parsed: ParsedMemories,
     history_msg: List[BaseMessage],
@@ -709,10 +653,15 @@ async def _invoke_llm(
     """调用 LLM 生成回复"""
     from app.service.chat.prompt_payload_builder import build_prompt_payload, payload_to_invoke_dict
 
-    # 构建 Prompt Template（不使用 _build_chat_chain，直接构建以获取 token 信息）
+    # 构建 Prompt Template（使用 markdown prompt，保留现有变量注入契约）
+    prompt_text = await PromptManager.get_prompt("chat_system")
+    prompt_text = escape_template(
+        prompt_text,
+        ["static_anchors", "user_profile_summary", "historical_context", "current_state"],
+    )
     template = ChatPromptTemplate(
         [
-            ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
+            ("system", prompt_text),
             MessagesPlaceholder("history_msg"),
             ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template:\n{user_message}")
         ]

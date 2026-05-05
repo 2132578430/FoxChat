@@ -6,6 +6,7 @@
 - 状态管理（current_state）
 - 时间节点管理（time_node）
 - 情绪分类
+- 话题焦点提取（Phase 1 新增）
 - 记忆总结
 - 运行时状态提取
 """
@@ -31,6 +32,7 @@ from app.service.chat.time_node_service import (
 from app.service.chat.memory_summary_service import async_summary_msg_parallel
 from app.service.chat.user_profile_service import update_user_profile_in_summary
 from app.service.chat.emotion_classifier import classify_and_update_emotion
+from app.service.chat.focus_extractor import classify_and_update_focus
 from app.service.chat.runtime_state_extractor import update_current_state_from_runtime
 
 __all__ = [
@@ -57,5 +59,6 @@ __all__ = [
     "async_summary_msg_parallel",
     "update_user_profile_in_summary",
     "classify_and_update_emotion",
+    "classify_and_update_focus",  # Phase 1 新增
     "update_current_state_from_runtime",
 ]

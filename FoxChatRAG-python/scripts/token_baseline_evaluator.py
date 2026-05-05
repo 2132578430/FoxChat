@@ -51,7 +51,7 @@ class ComponentSizes:
     character_card_detail: int = 0
     user_profile: int = 0
     memory_bank: int = 0
-    emotion_state: int = 0
+    current_state: int = 0
     relevant_memories: int = 0
     history_msg: int = 0
     user_input: int = 0
@@ -60,7 +60,7 @@ class ComponentSizes:
         return sum([
             self.soul, self.role_declaration, self.core_anchor,
             self.character_card, self.character_card_detail,
-            self.user_profile, self.memory_bank, self.emotion_state,
+            self.user_profile, self.memory_bank, self.current_state,
             self.relevant_memories, self.history_msg, self.user_input
         ])
 
@@ -82,7 +82,7 @@ class RoundResult:
     component_sizes: ComponentSizes
     token_data: TokenData
     memory_bank_items: int = 0
-    emotion_state_value: str = ""
+    current_state_value: str = ""
     timestamp: str = ""
 
 
@@ -174,8 +174,8 @@ def cleanup_test_redis_data(redis_client) -> None:
         build_memory_key(LLMChatConstant.MEMORY_BANK, TEST_USER_ID, TEST_LLM_ID),
         build_memory_key(LLMChatConstant.INIT_MEMORY, TEST_USER_ID, TEST_LLM_ID),
         build_memory_key(LLMChatConstant.RECENT_MSG, TEST_USER_ID, TEST_LLM_ID),
-        build_memory_key(LLMChatConstant.ROLE_EMOTION_STATE, TEST_USER_ID, TEST_LLM_ID),
-        build_memory_key(LLMChatConstant.ROLE_EMOTION_LOG, TEST_USER_ID, TEST_LLM_ID),
+        build_memory_key(LLMChatConstant.ROLE_CURRENT_STATE, TEST_USER_ID, TEST_LLM_ID),
+        build_memory_key(LLMChatConstant.ROLE_TIME_NODES, TEST_USER_ID, TEST_LLM_ID),
         LLMChatConstant.CHAT_MEMORY + TEST_USER_ID + ":" + TEST_LLM_ID + ":" + LLMChatConstant.RECENT_MSG,
     ]
 
@@ -203,9 +203,10 @@ async def traced_invoke_llm(
     关键：直接调用 LLM 而不经过 StrOutputParser，以获取 response_metadata
     """
     from app.core.llm_model import model as llm_model
-    from app.core.prompts.prompt_template import PromptTemplate
+    from app.core.prompts.prompt_manager import PromptManager
     from app.common.constant.ChromaTypeConstant import ChromaTypeConstant
     from app.util import chroma_util
+    from app.util.template_util import escape_template
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
     # 记录各组件字符数
@@ -217,7 +218,7 @@ async def traced_invoke_llm(
         character_card_detail=len(parsed.character_card_detail or ""),
         user_profile=len(parsed.user_profile_summary or ""),
         memory_bank=len(parsed.memory_bank_summary or ""),
-        emotion_state=len(parsed.emotion_state or ""),
+        current_state=len(parsed.current_state or ""),
         relevant_memories=0,
         history_msg=sum(len(str(m.content)) for m in history_msg) if history_msg else 0,
         user_input=len(msg_content)
@@ -240,32 +241,41 @@ async def traced_invoke_llm(
     # 获取 LLM 模型
     llm = await llm_model.get_chat_model()
 
-    # 构建 Prompt Template (复用现有模板)
+    # 构建 Prompt Template（复用 markdown 模板）
+    prompt_text = await PromptManager.get_prompt("chat_system")
+    prompt_text = escape_template(
+        prompt_text,
+        ["static_anchors", "user_profile_summary", "historical_context", "current_state"],
+    )
     template = ChatPromptTemplate(
         [
-            ("system", PromptTemplate.CHAT_SYSTEM_PROMPT_TEMPLATE),
+            ("system", prompt_text),
             MessagesPlaceholder("history_msg"),
             ("human", "Reply with a response that matches the current memory and identity according to the above prompts and memory template:\n{user_message}")
         ]
     )
+
+    static_anchors = "\n\n".join(
+        part for part in [
+            soul or "",
+            parsed.role_declaration or "",
+            parsed.core_anchor_text or "",
+            parsed.character_card_detail or "",
+            parsed.character_card_examples or "",
+        ] if part
+    )
+
+    historical_context = relevant_memories if relevant_memories else parsed.memory_bank_summary
 
     # 构建 chain，但不使用 StrOutputParser，以保留 metadata
     chain = template | llm
 
     # 调用 LLM，获取 AIMessage (而非字符串)
     aimessage = await chain.ainvoke({
-        "soul": soul or "",
-        "role_declaration": parsed.role_declaration,
-        "core_anchor": parsed.core_anchor_text,
-        "character_card": "",
-        "mes_example": parsed.character_card_examples,
-        "character_card_detail": parsed.character_card_detail,
-        "call_convention": "",
+        "static_anchors": static_anchors,
         "user_profile_summary": parsed.user_profile_summary,
-        "memory_bank_summary": parsed.memory_bank_summary,
-        "relevant_memories": relevant_memories,
-        "emotion_state": parsed.emotion_state,
-        "recent_chat": "",
+        "historical_context": historical_context,
+        "current_state": parsed.current_state,
         "history_msg": history_msg,
         "user_message": msg_content,
     })
@@ -309,21 +319,24 @@ def get_memory_bank_count(redis_client, user_id: str, llm_id: str) -> int:
         return 0
 
 
-def get_emotion_state_value(redis_client, user_id: str, llm_id: str) -> str:
-    """获取当前情绪状态值"""
+def get_current_state_value(redis_client, user_id: str, llm_id: str) -> str:
+    """获取当前状态摘要文本"""
     from app.common.constant.LLMChatConstant import LLMChatConstant, build_memory_key
 
-    key = build_memory_key(LLMChatConstant.ROLE_EMOTION_STATE, user_id, llm_id)
-    data = redis_client.get(key)
+    key = build_memory_key(LLMChatConstant.ROLE_CURRENT_STATE, user_id, llm_id)
+    data = redis_client.execute_command('JSON.GET', key)
 
     if not data:
-        return "neutral (default)"
+        return ""
 
     try:
-        state = json.loads(data)
-        return state.get('emotion', 'neutral')
-    except json.JSONDecodeError:
-        return "neutral (error)"
+        if isinstance(data, dict):
+            state = data
+        else:
+            state = json.loads(data)
+        return json.dumps(state, ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        return ""
 
 
 # ==================== 主循环逻辑 (任务 3.4, 4.x) ====================
@@ -386,7 +399,7 @@ async def run_evaluation_loop(
             component_sizes=sizes,
             token_data=token_data,
             memory_bank_items=get_memory_bank_count(redis_client, user_id, llm_id),
-            emotion_state_value=get_emotion_state_value(redis_client, user_id, llm_id),
+            current_state_value=get_current_state_value(redis_client, user_id, llm_id),
             timestamp=datetime.now().isoformat()
         )
         results.append(result_obj)
@@ -416,7 +429,7 @@ def calculate_component_percentages(results: List[RoundResult]) -> Dict[str, Lis
         "anchor": [],
         "profile": [],
         "memory_bank": [],
-        "emotion": [],
+        "current_state": [],
         "history": [],
         "user_input": [],
     }
@@ -432,7 +445,7 @@ def calculate_component_percentages(results: List[RoundResult]) -> Dict[str, Lis
         )
         percentages["profile"].append(result.component_sizes.user_profile / total_chars * 100)
         percentages["memory_bank"].append(result.component_sizes.memory_bank / total_chars * 100)
-        percentages["emotion"].append(result.component_sizes.emotion_state / total_chars * 100)
+        percentages["current_state"].append(result.component_sizes.current_state / total_chars * 100)
         percentages["history"].append(result.component_sizes.history_msg / total_chars * 100)
         percentages["user_input"].append(result.component_sizes.user_input / total_chars * 100)
 
@@ -536,7 +549,7 @@ def generate_component_table(percentages: Dict[str, List[float]]) -> str:
 
     lines = [header, separator]
 
-    for component in ["soul", "anchor", "profile", "memory_bank", "emotion", "history", "user_input"]:
+    for component in ["soul", "anchor", "profile", "memory_bank", "current_state", "history", "user_input"]:
         values = percentages.get(component, [])
         row = f"| {component} |"
         for i in range(min(5, rounds)):
@@ -660,7 +673,7 @@ def generate_report(results: List[RoundResult], percentages: Dict[str, List[floa
 基于设计文档 `memory_flow_recommended.md` 的建议:
 
 1. **Memory Bank 应改为按需检索** - 当前全量注入最后 5 条，应改为向量检索 + 相关性过滤
-2. **建立当前状态层** - 将 emotion_state 扩展为完整的 current_state (包含 relation_state, current_focus 等)
+2. **建立当前状态层** - 将 current_state 扩展为完整的 current_state (包含 relation_state, current_focus 等)
 3. **信息路由机制** - 总结结果应按职责路由，而非一股脑塞入 Memory Bank
 4. **Token 预算控制** - 各层应有明确 Token 预算，避免无限增长
 
