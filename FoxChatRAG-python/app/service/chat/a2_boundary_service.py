@@ -224,6 +224,74 @@ async def update_a2_boundaries_in_summary(
         logger.error(f"A2 边界更新过程中发生错误: {str(e)[:200]}, user_id={user_id}")
 
 
+async def update_a2_boundaries_from_text(
+    text_content: str,
+    user_id: str,
+    llm_id: str,
+) -> None:
+    """
+    从任意文本内容提取 A2 边界（并发版本）
+
+    与 update_a2_boundaries_in_summary 的区别：
+    - 输入源：任意文本（不限于 summary_text）
+    - 执行模式：并发调用，与其他总结任务并行
+    - 用途：直接从原始对话提取边界（无需等待 summary）
+
+    流程：
+    1. 从文本提取边界项（使用相同的正则逻辑）
+    2. 获取当前 A2 边界列表
+    3. 合并新边界项（避免重复）
+    4. 保存到 Redis
+
+    Args:
+        text_content: 任意文本内容（如原始对话、summary等）
+        user_id: 用户 ID
+        llm_id: 角色 ID
+    """
+    if not text_content:
+        logger.debug(f"[Parallel A2] 文本内容为空，跳过边界提取: user_id={user_id}")
+        return
+
+    try:
+        # 1. 提取新边界项（使用现有正则逻辑）
+        new_boundaries = extract_a2_boundaries_from_summary(text_content)
+
+        if not new_boundaries:
+            logger.debug(f"[Parallel A2] 未提取到 A2 边界: user_id={user_id}")
+            return
+
+        # 2. 获取当前边界列表
+        current_a2_list = _get_a2_boundaries(user_id, llm_id)
+        if not current_a2_list:
+            current_a2_list = A2BoundaryList(items=[])
+
+        # 3. 合并新边界项（使用现有逻辑）
+        for new_boundary in new_boundaries:
+            similar_index = current_a2_list.find_similar_boundary(new_boundary.content)
+
+            if similar_index is not None:
+                # 更新现有边界（增强置信度）
+                existing = current_a2_list.items[similar_index]
+                existing.confidence = min(1.0, existing.confidence + 0.05)
+                existing.last_updated_at = datetime.now().isoformat()
+                existing.evidence = new_boundary.evidence
+                logger.debug(f"[Parallel A2] 边界增强: {existing.content[:30]}...")
+            else:
+                # 添加新边界
+                current_a2_list.add_boundary(new_boundary)
+                logger.info(f"[Parallel A2] 边界新增: {new_boundary.content[:30]}...")
+
+        # 4. 保存到 Redis
+        success = _save_a2_boundaries(current_a2_list, user_id, llm_id)
+        if success:
+            logger.info(f"[Parallel A2] A2 边界更新完成: user_id={user_id}")
+        else:
+            logger.warning(f"[Parallel A2] A2 边界保存失败: user_id={user_id}")
+
+    except Exception as e:
+        logger.warning(f"[Parallel A2] A2 边界提取过程中发生错误: {str(e)[:200]}, user_id={user_id}")
+
+
 def get_active_a2_boundaries_for_injection(user_id: str, llm_id: str) -> str:
     """
     获取用于 Prompt 注入的 active A2 边界文本

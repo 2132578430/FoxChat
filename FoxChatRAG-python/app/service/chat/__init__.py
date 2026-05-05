@@ -10,6 +10,8 @@
 - 运行时状态提取
 """
 
+from app.service.chat.session_lock import acquire_session_lock, release_session_lock
+
 from app.service.chat.chat_msg_service import process_chat_msg, clear_chat_memory
 from app.service.chat.state_manager import (
     get_current_state,
@@ -26,12 +28,15 @@ from app.service.chat.time_node_service import (
     check_and_activate_due_time_nodes,
     extract_time_node_from_text,
 )
-from app.service.chat.memory_summary_service import async_summary_msg
+from app.service.chat.memory_summary_service import async_summary_msg_parallel
 from app.service.chat.user_profile_service import update_user_profile_in_summary
 from app.service.chat.emotion_classifier import classify_and_update_emotion
 from app.service.chat.runtime_state_extractor import update_current_state_from_runtime
 
 __all__ = [
+    # 会话锁（分布式）
+    "acquire_session_lock",
+    "release_session_lock",
     # 主流程
     "process_chat_msg",
     "clear_chat_memory",
@@ -49,7 +54,7 @@ __all__ = [
     "check_and_activate_due_time_nodes",
     "extract_time_node_from_text",
     # 后台任务
-    "async_summary_msg",
+    "async_summary_msg_parallel",
     "update_user_profile_in_summary",
     "classify_and_update_emotion",
     "update_current_state_from_runtime",

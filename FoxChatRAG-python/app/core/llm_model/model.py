@@ -158,6 +158,19 @@ glm_json_model = ChatOpenAI(
     model_kwargs={"response_format": {"type": "json_object"}}
 )
 
+# Astron 小模型配置（讯飞 MaaS 服务，用于后台任务）
+astron_model = ChatOpenAI(
+    model="astron-code-latest",
+    api_key=SecretStr(global_settings.key.astron_model),
+    base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+)
+astron_json_model = ChatOpenAI(
+    model="astron-code-latest",
+    api_key=SecretStr(global_settings.key.astron_model),
+    base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+    model_kwargs={"response_format": {"type": "json_object"}}
+)
+
 LLM_MAP = {
     "ds_model": ds_model,
     "json_ds_model": json_ds_model,
@@ -168,6 +181,8 @@ LLM_MAP = {
     "claude_model": claude_opus_model,
     "glm_model": glm_model,
     "glm_json_model": glm_json_model,
+    "astron_model": astron_model,
+    "astron_json_model": astron_json_model,
 }
 
 async def get_llm_model(llm_name: str):
@@ -242,7 +257,8 @@ async def get_chat_model():
         聊天模型实例
     """
     model_name = _resolve_model_name(global_settings.model_by_scenario.chat_llm)
-    logger.debug(f"获取聊天模型: {model_name}")
+    # 启动时打印配置，方便排查
+    logger.info(f"【模型配置】default_llm={global_settings.model.default_llm}, chat_llm={global_settings.model_by_scenario.chat_llm} → 解析为 {model_name}")
     return LLM_MAP.get(model_name)
 
 

@@ -60,18 +60,21 @@ def strip_all_tags(content: str) -> str:
 
 
 def strip_think_only(content: str) -> str:
-    """仅去除 LLM 返回的 <think> 标签，保留其他标签（如 <action>）
-    
+    """仅去除 LLM 返回的思考标签，保留其他标签（如 <action>）
+
     Args:
         content: 原始内容
-        
+
     Returns:
         清理后的内容（保留 action 等标签）
     """
     if not content:
         return ""
-    
-    # 只去除 <think> 标签
+
+    # 去除 <think> 标签
     content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-    
+
+    # 去除 <![CDATA[...]]> 思考过程标签（DeepSeek-R1 / Astron 格式）
+    content = re.sub(r'<!\[CDATA\[.*?\]\]>', '', content, flags=re.DOTALL)
+
     return content.strip()

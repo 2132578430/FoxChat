@@ -1,19 +1,26 @@
 import os
+import asyncio
 from contextlib import asynccontextmanager
 
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from loguru import logger
 
 from app.api import rag_router, chat_router
 from app.core.settings import global_settings
 from app.core.mq import init_rabbitmq, close_rabbitmq
 from app.exception import register_exception_handlers
+from app.service.chat.timer_scheduler import timer_scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 开启rabbitmq监听后台
     connection = await init_rabbitmq()
+
+    # 启动定时总结调度器
+    asyncio.create_task(timer_scheduler())
+    logger.info("[Timer Scheduler] Timer summary scheduler started")
 
     yield
 

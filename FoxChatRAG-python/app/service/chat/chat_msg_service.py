@@ -5,15 +5,20 @@
 - 对话主入口（process_chat_msg）
 - 处理用户消息，构建 Prompt
 - 调用 LLM 生成回复
-- 触发后台任务（记忆总结、状态更新）
+- 状态更新（同步，保证下一请求可见）
 - 解析 LLM 返回（去除 think 标签，解析 action 标签）
 - 清理对话记忆（clear_chat_memory）
 
 阶段2升级：
 - 使用 current_state 替代 emotion_state
 - 支持时间节点到期检查
+
+会话锁升级：
+- 分布式 Redis 锁 + Watchdog 自动续期
+- 支持多实例部署
 """
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -37,7 +42,8 @@ from app.service.chat.history_event_retrieval_service import (
 from app.exception.BusinessException import BusinessException
 from app.schemas import ChatMsgTo, MessageBlock
 from app.schemas.current_state import CurrentState, ItemStatus
-from app.service.chat.memory_summary_service import async_summary_msg
+from app.service.chat.memory_summary_service import trigger_summary_with_counter
+from app.service.chat.timer_scheduler import SUMMARY_MAX_TRIGGER_THRESHOLD
 from app.service.chat.emotion_classifier import classify_and_update_emotion
 from app.service.chat.runtime_state_extractor import update_current_state_from_runtime
 from app.util import chroma_util, strip_all_tags, strip_think_only
@@ -85,91 +91,112 @@ async def process_chat_msg(msg: ChatMsgTo, background_tasks: BackgroundTasks) ->
     4. 构建历史消息
     5. 调用 LLM
     6. 保存对话
-    7. 触发后台任务（记忆总结、状态更新）
+    7. 状态更新（同步，保证下一请求可见）
     8. 解析返回
     """
     user_id = msg.userId
     llm_id = msg.llmId
     msg_content = msg.msgContent
 
-    from app.service.chat.state_manager import get_current_round, clean_expired_unfinished_items, update_unfinished_items
-    from app.service.chat.time_node_service import route_due_time_nodes
-    from app.schemas.current_state import UnfinishedItem, ItemStatus
+    # 分布式会话锁：保证同一会话请求顺序处理（跨实例有效）
+    from app.service.chat.session_lock import acquire_session_lock, release_session_lock
 
-    # ========== 性能计时起点 ==========
-    current_round = get_current_round(user_id, llm_id)
-    clean_expired_unfinished_items(user_id, llm_id, current_round)
+    # redis_lock 是同步锁，用 asyncio.to_thread 包装获取
+    lock = await asyncio.to_thread(acquire_session_lock, user_id, llm_id)
 
-    # 时间节点到期路由：扫描 pending nodes，到期的路由到 B 层或 C 层
-    routing = route_due_time_nodes(user_id, llm_id, current_round)
-    if routing["unfinished_items"]:
-        activated_items = [
-            UnfinishedItem(
-                content=item["content"],
-                status=ItemStatus.PENDING,
-                confidence=item.get("confidence", 0.9),
-                expire_rounds=item.get("expire_rounds", 6),
-                update_round=current_round,
-                update_reason="时间节点到期激活",
-                created_at=item.get("created_at"),
-                due_at=item.get("due_at"),
+    try:
+        from app.service.chat.state_manager import get_current_round, clean_expired_unfinished_items, update_unfinished_items
+        from app.service.chat.time_node_service import route_due_time_nodes
+        from app.schemas.current_state import UnfinishedItem, ItemStatus
+
+        # ========== 性能计时起点 ==========
+        current_round = get_current_round(user_id, llm_id)
+        clean_expired_unfinished_items(user_id, llm_id, current_round)
+
+        # 时间节点到期路由：扫描 pending nodes，到期的路由到 B 层或 C 层
+        routing = route_due_time_nodes(user_id, llm_id, current_round)
+        if routing["unfinished_items"]:
+            activated_items = [
+                UnfinishedItem(
+                    content=item["content"],
+                    status=ItemStatus.PENDING,
+                    confidence=item.get("confidence", 0.9),
+                    expire_rounds=item.get("expire_rounds", 6),
+                    update_round=current_round,
+                    update_reason="时间节点到期激活",
+                    created_at=item.get("created_at"),
+                    due_at=item.get("due_at"),
+                )
+                for item in routing["unfinished_items"]
+            ]
+            update_unfinished_items(user_id, llm_id, activated_items, current_round)
+            logger.info(f"【时间节点激活】B层: {len(activated_items)} 条事项写入 unfinished_items")
+        retrieval_triggers = routing.get("retrieval_triggers", [])
+        if retrieval_triggers:
+            logger.info(f"【时间节点路由】C层触发: {len(retrieval_triggers)} 条信号")
+
+        # 1. 获取所有的记忆事件+人物卡+角色核心等等（性能关键点：_fetch_all_memories）
+        memories = await _fetch_all_memories(user_id, llm_id)
+
+        # 2. 解析记忆（性能关键点：_parse_all_memories；阶段4：使用 current_round 用于 current_state 过期判断）
+        parsed = _parse_all_memories(memories, current_round=current_round)
+
+        # 3. 构建历史消息（性能关键点：_build_history_message）
+        history_msg = await _build_history_message(memories.recent_msg)
+
+        # 4. 调用 LLM（性能关键点：_invoke_llm；任务 3.1：传入 current_state、recent_messages、retrieval_triggers）
+        recent_msg_key = _build_recent_msg_key(user_id, llm_id)
+        chat_response = await _invoke_llm(
+            parsed,
+            history_msg,
+            memories.init_memory,
+            msg_content,
+            user_id,
+            llm_id,
+            memories.current_state_json,
+            memories.recent_msg,
+            retrieval_triggers,
+        )
+        # ========== 性能计时终点 ==========
+
+        # 5. 保存对话
+        msg_count = await _save_chat_to_redis(
+            recent_msg_key, msg_content, chat_response
+        )
+
+        # 6. 触发后台任务（混合触发机制）
+        # Max threshold trigger: forced execution when ≥30 messages (prevents token explosion)
+        if msg_count >= SUMMARY_MAX_TRIGGER_THRESHOLD:
+            background_tasks.add_task(
+                trigger_summary_with_counter,
+                recent_msg_key,
+                msg_count,
+                user_id,
+                llm_id,
+                trigger_source="max_threshold"
             )
-            for item in routing["unfinished_items"]
-        ]
-        update_unfinished_items(user_id, llm_id, activated_items, current_round)
-        logger.info(f"【时间节点激活】B层: {len(activated_items)} 条事项写入 unfinished_items")
-    retrieval_triggers = routing.get("retrieval_triggers", [])
-    if retrieval_triggers:
-        logger.info(f"【时间节点路由】C层触发: {len(retrieval_triggers)} 条信号")
 
-    # 1. 获取所有的记忆事件+人物卡+角色核心等等（性能关键点：_fetch_all_memories）
-    memories = await _fetch_all_memories(user_id, llm_id)
+        # Timer-based trigger: handled by timer_scheduler (checks every 45s, min 18 messages)
+        pure_text = strip_all_tags(chat_response)
 
-    # 2. 解析记忆（性能关键点：_parse_all_memories；阶段4：使用 current_round 用于 current_state 过期判断）
-    parsed = _parse_all_memories(memories, current_round=current_round)
+        # 阶段2新增：先递增轮数，获取当前轮数用于过期判断
+        current_round = increment_round_counter(user_id, llm_id)
 
-    # 3. 构建历史消息（性能关键点：_build_history_message）
-    history_msg = await _build_history_message(memories.recent_msg)
+        # 同步状态更新：保证下一请求能看到完整更新
+        # 情绪分类（异步函数，需要 await）
+        await classify_and_update_emotion(user_id, llm_id, pure_text, current_round)
 
-    # 4. 调用 LLM（性能关键点：_invoke_llm；任务 3.1：传入 current_state、recent_messages、retrieval_triggers）
-    recent_msg_key = _build_recent_msg_key(user_id, llm_id)
-    chat_response = await _invoke_llm(
-        parsed,
-        history_msg,
-        memories.init_memory,
-        msg_content,
-        user_id,
-        llm_id,
-        memories.current_state_json,
-        memories.recent_msg,
-        retrieval_triggers,
-    )
-    # ========== 性能计时终点 ==========
+        # 运行时状态更新（同步函数，直接调用）
+        update_current_state_from_runtime(
+            user_id, llm_id, msg_content, pure_text, current_round
+        )
 
-    # 5. 保存对话
-    msg_count = await _save_chat_to_redis(
-        recent_msg_key, msg_content, chat_response
-    )
-
-    # 6. 触发后台任务
-    background_tasks.add_task(async_summary_msg, recent_msg_key, msg_count, user_id, llm_id)
-    pure_text = strip_all_tags(chat_response)
-
-    # 阶段2新增：先递增轮数，获取当前轮数用于过期判断
-    current_round = increment_round_counter(user_id, llm_id)
-
-    # 后台任务：情绪分类（传入当前轮数）
-    background_tasks.add_task(classify_and_update_emotion, user_id, llm_id, pure_text, current_round)
-
-    # 后台任务：运行时状态更新（传入当前轮数）
-    background_tasks.add_task(
-        update_current_state_from_runtime,
-        user_id, llm_id, msg_content, pure_text, current_round
-    )
-
-    # 7. 解析返回
-    clean_response = strip_think_only(chat_response)
-    return parse_action_tags(clean_response)
+        # 7. 解析返回
+        clean_response = strip_think_only(chat_response)
+        return parse_action_tags(clean_response)
+    finally:
+        # 释放分布式锁
+        release_session_lock(lock)
 
 
 async def clear_chat_memory(user_id: str, llm_id: str) -> None:

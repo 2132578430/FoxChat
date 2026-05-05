@@ -13,8 +13,10 @@
 - 各路候选分别写回对应存储
 """
 
+import asyncio
 import json
 import re
+import time
 from datetime import datetime
 from typing import List
 
@@ -192,6 +194,93 @@ async def _compress_memory_bank_if_needed(user_id: str, llm_id: str) -> None:
         logger.info(f"memory_bank 压缩完成: {len(memory_bank)} -> {len(compressed_memory_bank)} 条")
     except json.JSONDecodeError:
         logger.warning(f"memory_bank 压缩 JSON 解析失败")
+
+
+async def _extract_compress_events(recent_msg_list: List[str], user_id: str, llm_id: str) -> None:
+    """
+    事件处理全链：提取 → 追加 → 压缩（内部串行，外部并行）
+
+    合并三个依赖任务为单次异步调用：
+    1. 提取事件 (_extract_memory_events)
+    2. 追加到 memory_bank (_append_to_memory_bank)
+    3. 压缩 memory_bank (_compress_memory_bank_if_needed)
+
+    错误处理：
+    - 每步独立 try-except
+    - 失败不中断流程（容错优先）
+    - 关键路径记录 ERROR，其他 WARNING
+
+    Args:
+        recent_msg_list: 最近消息列表
+        user_id: 用户 ID
+        llm_id: 角色 ID
+    """
+    try:
+        # 步骤1: 提取事件
+        logger.info("[Event Chain Task] 开始提取事件...")
+        events = await _extract_memory_events(recent_msg_list)
+
+        if not events:
+            logger.info("[Event Chain Task] 未提取到事件，跳过后续步骤")
+            return
+
+        # 步骤2: 追加到 memory_bank
+        try:
+            await _append_to_memory_bank(events, user_id, llm_id)
+            logger.info(f"[Event Chain Task] 已追加 {len(events)} 条事件到 memory_bank")
+        except Exception as e:
+            logger.error(f"[Event Chain Task] 追加 memory_bank 失败: {e}")
+            # 追加失败则不执行压缩（数据不完整）
+            return
+
+        # 步骤3: 压缩 memory_bank（如需要）
+        try:
+            await _compress_memory_bank_if_needed(user_id, llm_id)
+            logger.info("[Event Chain Task] memory_bank 压缩检查完成")
+        except Exception as e:
+            logger.warning(f"[Event Chain Task] memory_bank 压缩失败: {e}")
+            # 压缩失败不影响已追加数据
+
+    except Exception as e:
+        logger.error(f"[Event Chain Task] 事件处理链异常: {e}")
+
+
+async def _update_a2_boundaries_parallel(recent_msg_list: List[str], user_id: str, llm_id: str) -> None:
+    """
+    A2 边界并行处理（直接处理原始对话，不依赖 summary_text）
+
+    并发改造：
+    - 输入源改为 recent_msg_list（而非 summary_text）
+    - 合并为单文本后进行正则提取
+    - 与其他总结任务并发执行
+
+    错误处理：
+    - A2 边界为非关键任务，失败可容忍
+    - 记录 WARNING 级别日志
+    - 不中断其他并发任务
+
+    Args:
+        recent_msg_list: 最近消息列表
+        user_id: 用户 ID
+        llm_id: 角色 ID
+    """
+    try:
+        # 合并原始对话为单文本
+        combined_text = "\n".join(recent_msg_list)
+
+        if not combined_text.strip():
+            logger.debug("[A2 Boundary Task] 原始对话为空，跳过边界提取")
+            return
+
+        # 调用 A2 边界服务（传入原始对话）
+        from app.service.chat.a2_boundary_service import update_a2_boundaries_from_text
+
+        await update_a2_boundaries_from_text(combined_text, user_id, llm_id)
+        logger.info("[A2 Boundary Task] A2 边界提取完成")
+
+    except Exception as e:
+        logger.warning(f"[A2 Boundary Task] A2 边界提取失败: {e}")
+        # A2 边界为非关键任务，失败不影响其他流程
 
 
 async def _summary_and_upload(recent_msg_list: List[str], user_id: str, llm_id: str) -> str:
@@ -566,20 +655,25 @@ async def _deduplicate_and_append_events(
                     break
 
 
-async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
+async def async_summary_msg_parallel(recent_msg_key: str, recent_msg_size: int, user_id: str, llm_id: str) -> None:
     """
-    异步消息总结主流程（每7轮触发一次）
+    异步消息总结主流程（并发版本，每18轮触发一次）
 
     流程：
     1. 取出最近消息，保留最近 RECENT_MSG_KEEP_SIZE 条
-    2. 总结消息存入向量数据库
-    3. 提取四路候选并分流
-    4. 各路候选分别写回
-    5. 更新用户画像
+    2. 并发执行四路总结任务：
+       - Summary生成和上传
+       - A2边界提取
+       - 事件提取、追加、压缩（合并链）
+       - 用户画像更新
 
-    阶段3升级：
-    - 使用候选路由服务进行分流
-    - 保留兼容的事件提取和 memory_bank 写入
+    并发优化：
+    - 使用 asyncio.gather() 并发执行独立任务
+    - 依赖任务合并为单链，内部串行外部并行
+    - 错误处理支持部分成功，各路独立日志
+
+    情绪处理：
+    - 情绪分类保持实时（每轮），不批量处理
     """
     if recent_msg_size < SUMMARY_TRIGGER_THRESHOLD:
         return
@@ -596,26 +690,197 @@ async def async_summary_msg(recent_msg_key: str, recent_msg_size: int, user_id: 
 
     logger.debug(f"记忆总结触发: 原始 {recent_msg_size} 条, 保留 {RECENT_MSG_KEEP_SIZE} 条, 总结 {len(recent_msg_list)} 条")
 
-    # 1. 上传向量数据库（获取总结文本）
-    summary_text = await _summary_and_upload(recent_msg_list, user_id, llm_id)
+    # 并发执行四路总结任务
+    logger.info("【并发总结】开始并发执行四路任务...")
 
-    # 2. 简化链路：直接调用 A2 边界提取、user_profile 更新与 memory_bank 保底沉淀
-    # 移除通用 candidate 分流总线，改为职责收敛的三路处理
-    from app.service.chat.a2_boundary_service import update_a2_boundaries_in_summary
+    # 定义并发任务（每个任务独立错误处理）
+    async def task_summary():
+        """任务1: Summary生成和上传"""
+        try:
+            result = await _summary_and_upload(recent_msg_list, user_id, llm_id)
+            logger.info("[Summary Task] Summary生成和上传完成")
+            return result
+        except Exception as e:
+            logger.error(f"[Summary Task] Summary生成失败: {e}")
+            return ""
 
-    # 2.1 A2 边界提取与写回
-    await update_a2_boundaries_in_summary(user_id, llm_id, summary_text)
+    async def task_a2_boundaries():
+        """任务2: A2边界提取"""
+        try:
+            await _update_a2_boundaries_parallel(recent_msg_list, user_id, llm_id)
+            logger.info("[A2 Boundary Task] A2边界提取完成")
+        except Exception as e:
+            logger.warning(f"[A2 Boundary Task] A2边界提取失败: {e}")
 
-    # 2.2 user_profile 更新（后续任务 3.3 会调整）
-    # TODO: 调整 user_profile 更新链路（任务 3.3）
+    async def task_events():
+        """任务3: 事件处理链（提取→追加→压缩）"""
+        try:
+            await _extract_compress_events(recent_msg_list, user_id, llm_id)
+            logger.info("[Event Chain Task] 事件处理链完成")
+        except Exception as e:
+            logger.error(f"[Event Chain Task] 事件处理失败: {e}")
 
-    # 3. 兼容链路：保留旧事件提取作为 memory_bank 保底
-    events = await _extract_memory_events(recent_msg_list)
-    if events:
-        await _append_to_memory_bank(events, user_id, llm_id)
+    async def task_user_profile():
+        """任务4: 用户画像更新"""
+        try:
+            await update_user_profile_in_summary(user_id, llm_id, recent_msg_list)
+            logger.info("[User Profile Task] 用户画像更新完成")
+        except Exception as e:
+            logger.warning(f"[User Profile Task] 用户画像更新失败: {e}")
 
-    # 4. 压缩 memory_bank
-    await _compress_memory_bank_if_needed(user_id, llm_id)
+    # 并发执行（使用 asyncio.gather，不阻塞其他任务）
+    await asyncio.gather(
+        task_summary(),
+        task_a2_boundaries(),
+        task_events(),
+        task_user_profile(),
+    )
 
-    # 5. 更新用户画像（保持 summary 周期触发）
-    await update_user_profile_in_summary(user_id, llm_id, recent_msg_list)
+    logger.info("【并发总结】所有总结任务完成")
+
+
+# ============================================================================
+# Hybrid Trigger: Distributed Lock and Counter-based Task Queuing
+# ============================================================================
+
+async def trigger_summary_with_counter(
+    recent_msg_key: str,
+    recent_msg_size: int,
+    user_id: str,
+    llm_id: str,
+    trigger_source: str
+) -> None:
+    """
+    Trigger summary with distributed lock and counter-based queuing.
+
+    Hybrid trigger mechanism entry point:
+    - Timer-based trigger (45s interval, min 18 messages)
+    - Max threshold trigger (30 messages forced trigger)
+
+    Lock handling:
+    - If lock acquired: execute summary loop to process current and queued tasks
+    - If lock failed: increment counter to queue this trigger, return immediately (non-blocking)
+
+    Args:
+        recent_msg_key: Redis key for recent messages
+        recent_msg_size: Current message count (at trigger time)
+        user_id: User ID
+        llm_id: LLM/character ID
+        trigger_source: "timer" or "max_threshold"
+    """
+    # Distributed lock key
+    lock_key = f"summary_lock:{user_id}:{llm_id}"
+
+    # Attempt to acquire lock (60s timeout to prevent deadlock)
+    lock_acquired = redis_client.set(lock_key, "1", nx=True, ex=60)
+
+    if not lock_acquired:
+        # Lock held by another trigger → queue this task
+        counter_key = f"summary_counter:{user_id}:{llm_id}"
+        redis_client.incr(counter_key)
+        redis_client.expire(counter_key, 300)  # TTL 5 minutes
+
+        logger.info(f"[{trigger_source}] Lock held for {user_id}:{llm_id}, counter incremented (queued)")
+        return  # Return immediately, non-blocking
+
+    try:
+        # Lock acquired → execute summary loop
+        logger.info(f"[{trigger_source}] Lock acquired for {user_id}:{llm_id}, entering summary loop")
+
+        await execute_summary_loop(
+            recent_msg_key,
+            user_id,
+            llm_id,
+            trigger_source
+        )
+
+    finally:
+        # Always release lock
+        redis_client.delete(lock_key)
+        logger.debug(f"[{trigger_source}] Lock released for {user_id}:{llm_id}")
+
+
+async def execute_summary_loop(
+    recent_msg_key: str,
+    user_id: str,
+    llm_id: str,
+    trigger_source: str
+) -> None:
+    """
+    Execute summary in loop to process all queued tasks adaptively.
+
+    Loop mechanism:
+    - Each iteration processes current recent_msg state (adaptive, not snapshot)
+    - After each summary, check counter for queued tasks
+    - If counter > 0: decrement and continue loop
+    - If counter = 0: delete counter, exit loop
+
+    Adaptive processing:
+    - Each iteration uses current recent_msg_size, not trigger-time snapshot
+    - User's ongoing messages naturally included in subsequent iterations
+    - Always retains last RECENT_MSG_KEEP_SIZE (10) messages
+
+    Args:
+        recent_msg_key: Redis key for recent messages
+        user_id: User ID
+        llm_id: LLM/character ID
+        trigger_source: "timer" or "max_threshold" (for logging)
+    """
+    counter_key = f"summary_counter:{user_id}:{llm_id}"
+
+    # Loop until counter = 0
+    while True:
+        # Check current recent_msg size (adaptive)
+        recent_msg_size = redis_client.llen(recent_msg_key)
+
+        # Check if sufficient messages for summary
+        if recent_msg_size < SUMMARY_TRIGGER_THRESHOLD:
+            logger.debug(f"[Loop] {user_id}:{llm_id} has {recent_msg_size} messages, below threshold, skip")
+
+            # Check counter for queued tasks
+            counter = int(redis_client.get(counter_key) or 0)
+            if counter > 0:
+                redis_client.decr(counter_key)
+                logger.debug(f"[Loop] Counter decremented: {counter} → {counter-1}, continue")
+                continue  # Continue to next iteration
+            else:
+                redis_client.delete(counter_key)
+                logger.debug(f"[Loop] Counter = 0, exit loop")
+                break  # Exit loop
+
+        # Execute summary (adaptive with current recent_msg_size)
+        # Calculate messages to process
+        messages_to_process = recent_msg_size - RECENT_MSG_KEEP_SIZE
+        logger.info(
+            f"[{trigger_source}] {user_id}:{llm_id} 开始总结: "
+            f"原始 {recent_msg_size} 条, 处理 {messages_to_process} 条, 保留 {RECENT_MSG_KEEP_SIZE} 条"
+        )
+
+        await async_summary_msg_parallel(
+            recent_msg_key,
+            recent_msg_size,
+            user_id,
+            llm_id
+        )
+
+        # Check remaining messages after summary
+        remaining_size = redis_client.llen(recent_msg_key)
+        logger.info(
+            f"[{trigger_source}] {user_id}:{llm_id} 总结完成: "
+            f"处理了 {messages_to_process} 条, 剩余 {remaining_size} 条"
+        )
+
+        # Reset timer after summary completion
+        from app.service.chat.timer_scheduler import reset_timer
+        reset_timer(user_id, llm_id)
+
+        # Check counter for queued tasks
+        counter = int(redis_client.get(counter_key) or 0)
+        if counter > 0:
+            redis_client.decr(counter_key)
+            logger.info(f"[Loop] Summary complete, counter decremented: {counter} → {counter-1}, continue")
+            continue  # Continue to next iteration for queued task
+        else:
+            redis_client.delete(counter_key)
+            logger.info(f"[Loop] Summary complete, counter = 0, exit loop")
+            break  # Exit loop

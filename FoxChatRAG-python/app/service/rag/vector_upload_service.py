@@ -26,7 +26,7 @@ from app.common import FileTypeConstant
 from app.common.constant.ChromaTypeConstant import ChromaTypeConstant
 from app.common.constant.LLMChatConstant import LLMChatConstant
 from app.core.db.redis_client import redis_client
-from app.core.llm_model import ds_model, model, json_ds_model
+from app.core.llm_model.model import LLM_MAP, _resolve_model_name
 from app.core.net import download_file
 from app.models.rag_file import RagFile
 from app.util import loader_util, chroma_util
@@ -57,7 +57,11 @@ async def _summary_file_content(documents: list[Document]) -> dict:
             ("user", f"用户发送信息为：{upload_str}")
         ]
     )
-    chain = template | json_ds_model | str_parser
+
+    # 使用配置的 default_json 模型
+    model_name = _resolve_model_name("default_json")
+    llm = LLM_MAP.get(model_name)
+    chain = template | llm | str_parser
 
     res = chain.invoke(input={"upload_str": upload_str})
 

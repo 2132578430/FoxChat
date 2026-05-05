@@ -40,18 +40,23 @@ def _extract_json_array_text(raw_text: str) -> str:
     return text[start:end + 1]
 
 
-async def _call_llm(prompt_template: str, variables: dict, model_name: str = "ds_model") -> str:
+async def _call_llm(prompt_template: str, variables: dict, model_name: str = "default") -> str:
     """
     调用模型
 
     Args:
         prompt_template: 提示词模板文件名（不含.md后缀）
         variables: 模板变量字典，如 {"input_content": "用户输入内容"}
-        model_name: 模型名称，默认使用 ds_model
+        model_name: 模型名称，默认使用配置的默认模型
 
     Returns:
         模型返回的字符串结果
     """
+    from app.core.settings import global_settings
+    from app.core.llm_model.model import _resolve_model_name
+
+    # 解析模型名称（支持 default/default_json）
+    resolved_name = _resolve_model_name(model_name)
     prompt_str = await PromptManager.get_prompt(prompt_template)
     prompt_str = escape_template(prompt_str, list(variables.keys()))
     prompt = ChatPromptTemplate.from_messages([
@@ -59,7 +64,7 @@ async def _call_llm(prompt_template: str, variables: dict, model_name: str = "ds
         ("human", "{input_content}")
     ])
 
-    llm = LLM_MAP.get(model_name)
+    llm = LLM_MAP.get(resolved_name)
     output_parser = StrOutputParser()
     chain = prompt | llm | output_parser
 
@@ -77,7 +82,7 @@ async def _generate_user_profile(experience: str) -> dict:
     """
     生成用户画像
     """
-    result = await _call_llm("user_profile.md", {"input_content": experience}, "json_ds_model")
+    result = await _call_llm("user_profile.md", {"input_content": experience}, "default_json")
     try:
         return json.loads(result)
     except json.JSONDecodeError as e:
@@ -89,7 +94,7 @@ async def _extract_initial_events(experience: str) -> list:
     """
     生成关键事件或状态
     """
-    result = await _call_llm("memory_event_extractor.md", {"input_content": experience}, "json_ds_model")
+    result = await _call_llm("memory_event_extractor.md", {"input_content": experience}, "default_json")
     try:
         return json.loads(_extract_json_array_text(result))
     except json.JSONDecodeError as e:
@@ -101,7 +106,7 @@ async def _generate_character_card(experience: str) -> dict:
     """
     生成角色卡（基于 SillyTavern 结构）
     """
-    result = await _call_llm("character_card.md", {"input_content": experience}, "json_ds_model")
+    result = await _call_llm("character_card.md", {"input_content": experience}, "default_json")
     try:
         return json.loads(result)
     except json.JSONDecodeError as e:
